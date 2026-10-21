@@ -1,220 +1,230 @@
 #!/bin/sh
-# Lync quick installer for Linux.
+# install.sh - install Lync from a GitHub Release package.
 #
-# Detects the distro, installs build dependencies (Go, git, make), fetches
-# the source, builds the binaries, installs to /usr/sbin and /etc/lync, and
-# (when systemd is present) enables the lync service.
-#
-# Usage from a fresh host:
 #   curl -fsSL https://raw.githubusercontent.com/ryan785/lync/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/ryan785/lync/main/install.sh | sudo sh -s -- --version v0.2.0
 #
-# Or from a clone:
-#   sudo ./install.sh
+# Downloads the .deb / .rpm / .apk for this machine's architecture
+# (amd64, arm64) plus SHA256SUMS, verifies the checksum and installs the
+# package with the native tool (apt-get, dnf, yum, zypper, apk). The package
+# enables and starts lync.service when systemd is running. Nothing is
+# compiled and no build tools are installed. On other distros the static
+# binaries, config and systemd unit are installed by hand under the same
+# paths. The temporary download directory is removed on exit.
 #
-# Environment overrides:
-#   LYNC_REPO        git URL to clone        (default: https://github.com/ryan785/lync.git)
-#   LYNC_REF         branch/tag/commit       (default: main)
-#   LYNC_WORKDIR     build directory         (default: /tmp/lync-install)
-#   LYNC_START       1 to start the service  (default: 1; set 0 to install only)
-#   LYNC_NO_COLOR    1 to disable ANSI       (default: empty)
+# Options / environment:
+#   --version vX.Y.Z   release to install (LYNC_VERSION; default: latest)
+#   --base-url URL     directory holding the release assets (LYNC_BASE_URL;
+#                      a mirror, or file:///path/to/dist for local testing)
+#   LYNC_REPO          GitHub repository (default: ryan785/lync)
 
 set -eu
 
-REPO="${LYNC_REPO:-https://github.com/ryan785/lync.git}"
-REF="${LYNC_REF:-main}"
-WORKDIR="${LYNC_WORKDIR:-/tmp/lync-install}"
-START_NOW="${LYNC_START:-1}"
+REPO=${LYNC_REPO:-ryan785/lync}
+VERSION=${LYNC_VERSION:-latest}
+BASE_URL=${LYNC_BASE_URL:-}
+TMP=""
 
-# ---- output -----------------------------------------------------------------
-if [ -t 1 ] && [ -z "${LYNC_NO_COLOR:-}" ]; then
-  C_INFO='\033[1;36m'; C_WARN='\033[1;33m'; C_ERR='\033[1;31m'; C_OK='\033[1;32m'; C_RESET='\033[0m'
-else
-  C_INFO=''; C_WARN=''; C_ERR=''; C_OK=''; C_RESET=''
-fi
-log()  { printf "${C_INFO}[lync]${C_RESET} %s\n" "$*"; }
-warn() { printf "${C_WARN}[lync]${C_RESET} %s\n" "$*" >&2; }
-err()  { printf "${C_ERR}[lync]${C_RESET} %s\n" "$*" >&2; }
-ok()   { printf "${C_OK}[lync]${C_RESET} %s\n" "$*"; }
-
+say() { printf '[lync] %s\n' "$*"; }
+die() {
+	printf '[lync] error: %s\n' "$*" >&2
+	exit 1
+}
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# ---- preflight --------------------------------------------------------------
-require_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    err "installer must run as root (use sudo)"
-    exit 1
-  fi
-}
+cleanup() { [ -z "$TMP" ] || rm -rf "$TMP"; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-detect_distro() {
-  if [ ! -r /etc/os-release ]; then
-    err "/etc/os-release not readable; cannot detect distro"
-    exit 1
-  fi
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  DISTRO_ID="${ID:-unknown}"
-  DISTRO_LIKE="${ID_LIKE:-}"
-  DISTRO_PRETTY="${PRETTY_NAME:-$DISTRO_ID}"
-}
-
-distro_family() {
-  case "$DISTRO_ID" in
-    rhel|rocky|almalinux|centos|fedora|amzn|ol|oracle) echo "rhel" ;;
-    debian|ubuntu|linuxmint|pop|raspbian|kali) echo "debian" ;;
-    alpine) echo "alpine" ;;
-    opensuse-leap|opensuse-tumbleweed|sles|suse) echo "suse" ;;
-    *)
-      case "$DISTRO_LIKE" in
-        *rhel*|*fedora*) echo "rhel" ;;
-        *debian*) echo "debian" ;;
-        *suse*) echo "suse" ;;
-        *) echo "unknown" ;;
-      esac
-      ;;
-  esac
-}
-
-# ---- package installation ---------------------------------------------------
-install_build_deps() {
-  fam="$(distro_family)"
-  case "$fam" in
-    rhel)   dnf install -y golang git make ;;
-    debian) apt-get update -qq && apt-get install -y golang-go git make ;;
-    alpine) apk add --no-cache go git make ;;
-    suse)   zypper --non-interactive install -y go git make ;;
-    *)
-      err "unsupported distro: $DISTRO_PRETTY"
-      err "install Go (>= 1.23), git, and make manually, then re-run."
-      exit 1
-      ;;
-  esac
-}
-
-# Returns 0 if Go >= 1.23 is available, 1 otherwise.
-go_version_ok() {
-  have go || return 1
-  v=$(go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')
-  major=$(echo "$v" | cut -d. -f1)
-  minor=$(echo "$v" | cut -d. -f2)
-  [ -n "$major" ] && [ -n "$minor" ] || return 1
-  if [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 23 ]; }; then
-    return 0
-  fi
-  return 1
-}
-
-ensure_deps() {
-  if have go && have git && have make && go_version_ok; then
-    log "build tools present (go $(go version | awk '{print $3}'))"
-    return
-  fi
-  log "installing build dependencies via $(distro_family) package manager"
-  install_build_deps
-  if ! go_version_ok; then
-    warn "Go from the distro repo is older than 1.23 (lync needs 1.23+)."
-    warn "Install a newer Go from https://go.dev/dl/ and re-run this script."
-    exit 1
-  fi
-}
-
-# ---- source -----------------------------------------------------------------
-fetch_source() {
-  # If the script is run from a clone (go.mod present + module name matches),
-  # build in place rather than re-cloning.
-  if [ -f ./go.mod ] && grep -q "github.com/ryan785/lync" ./go.mod 2>/dev/null; then
-    SOURCE_DIR="$(pwd)"
-    log "using local source tree: $SOURCE_DIR"
-    return
-  fi
-  SOURCE_DIR="$WORKDIR"
-  if [ -d "$SOURCE_DIR/.git" ]; then
-    log "updating existing clone at $SOURCE_DIR"
-    git -C "$SOURCE_DIR" fetch --quiet --tags origin
-    git -C "$SOURCE_DIR" checkout --quiet "$REF"
-    git -C "$SOURCE_DIR" pull --quiet --ff-only origin "$REF" || true
-  else
-    log "cloning $REPO -> $SOURCE_DIR (ref $REF)"
-    rm -rf "$SOURCE_DIR"
-    if ! git clone --quiet --depth 1 --branch "$REF" "$REPO" "$SOURCE_DIR" 2>/dev/null; then
-      # Fallback if REF is a non-branch (commit SHA, tag not as branch).
-      git clone --quiet "$REPO" "$SOURCE_DIR"
-      git -C "$SOURCE_DIR" checkout --quiet "$REF"
-    fi
-  fi
-}
-
-# ---- build / install --------------------------------------------------------
-build_and_install() {
-  log "building (cd $SOURCE_DIR && make build)"
-  ( cd "$SOURCE_DIR" && make build )
-  log "installing to /usr/sbin, /usr/bin, /etc/lync"
-  ( cd "$SOURCE_DIR" && make install )
-}
-
-# ---- service ----------------------------------------------------------------
-setup_service() {
-  if ! have systemctl; then
-    case "$DISTRO_ID" in
-      alpine)
-        warn "Alpine uses OpenRC. The shipped systemd unit will not be honored."
-        warn "See docs/INSTALL.md for an OpenRC init script template."
-        ;;
-      *)
-        warn "systemctl not found. Start lyncd manually: /usr/sbin/lyncd &"
-        ;;
-    esac
-    return
-  fi
-  log "reloading systemd"
-  systemctl daemon-reload
-  if [ "$START_NOW" = "1" ]; then
-    log "enabling and starting lync"
-    systemctl enable --now lync
-    sleep 2
-    if systemctl is-active --quiet lync; then
-      ok "lync is running"
-    else
-      warn "lync failed to start; see: journalctl -u lync --no-pager -n 50"
-    fi
-  else
-    systemctl enable lync
-    log "lync enabled but not started (LYNC_START=0). Start when ready: systemctl start lync"
-  fi
-}
-
-# ---- final notes ------------------------------------------------------------
-print_done() {
-  echo
-  ok "installation complete on $DISTRO_PRETTY"
-  cat <<'EOF'
-
-  Daemon status     :  lync status
-  Trigger scan      :  lync scan
-  Scope a scan      :  lync scan -package openssh   /   -service sshd   /   -kernel
-  Past reports      :  lync reports
-  Daemon logs       :  journalctl -u lync -f
-  Config            :  /etc/lync/lync.yaml         (restart lync after edits)
-  Reports written to:  /var/lib/lync/reports/
-
-The first feed sync takes ~2 minutes with the default 30-day NVD window.
-Set feed.sources[name=nvd].api_key in /etc/lync/lync.yaml (free key from
-https://nvd.nist.gov/developers/request-an-api-key) for the full 120-day
-window in seconds.
-
+usage() {
+	cat <<'EOF'
+usage: install.sh [--version vX.Y.Z] [--base-url URL]
+  --version vX.Y.Z   release to install (default: latest)
+  --base-url URL     directory holding the release assets (mirror, or file:///path)
+Installs the lync .deb/.rpm/.apk for this machine and starts lync.service.
 EOF
+	exit "$1"
 }
 
-# ---- main -------------------------------------------------------------------
-main() {
-  require_root
-  detect_distro
-  log "detected: $DISTRO_PRETTY  (ID=$DISTRO_ID, family=$(distro_family))"
-  ensure_deps
-  fetch_source
-  build_and_install
-  setup_service
-  print_done
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--version)
+		[ $# -ge 2 ] || die "--version needs a value (e.g. v0.2.0)"
+		VERSION=$2
+		shift 2
+		;;
+	--version=*)
+		VERSION=${1#*=}
+		shift
+		;;
+	--base-url)
+		[ $# -ge 2 ] || die "--base-url needs a value"
+		BASE_URL=$2
+		shift 2
+		;;
+	--base-url=*)
+		BASE_URL=${1#*=}
+		shift
+		;;
+	-h | --help) usage 0 ;;
+	*) die "unknown option: $1 (try --help)" ;;
+	esac
+done
+case "$VERSION" in
+latest | v[0-9]*) ;;
+[0-9]*) VERSION="v$VERSION" ;;
+*) die "bad version '$VERSION' (expected latest or vX.Y.Z)" ;;
+esac
+
+[ "$(id -u)" -eq 0 ] || die "run as root (pipe into 'sudo sh')"
+
+case "$(uname -m)" in
+x86_64 | amd64) ARCH=amd64 ;;
+aarch64 | arm64) ARCH=arm64 ;;
+*) die "unsupported architecture $(uname -m) (packages exist for amd64 and arm64)" ;;
+esac
+
+# Package tools and systemctl get </dev/null: under `curl | sh` stdin is
+# the rest of this script.
+
+# Package family, by the package manager that is actually present.
+if have apk; then
+	FAMILY=apk
+elif have apt-get && have dpkg; then
+	FAMILY=deb
+elif have dnf; then
+	FAMILY=rpm PKGTOOL=dnf
+elif have yum; then
+	FAMILY=rpm PKGTOOL=yum
+elif have zypper; then
+	FAMILY=rpm PKGTOOL=zypper
+else
+	FAMILY=manual
+fi
+
+# --- download + verify -------------------------------------------------------
+url_for() {
+	if [ -n "$BASE_URL" ]; then
+		echo "${BASE_URL%/}/$1"
+	elif [ "$VERSION" = latest ]; then
+		echo "https://github.com/$REPO/releases/latest/download/$1"
+	else
+		echo "https://github.com/$REPO/releases/download/$VERSION/$1"
+	fi
 }
 
-main "$@"
+fetch() { # NAME
+	u=$(url_for "$1")
+	if [ "${u#file://}" != "$u" ] && ! have curl; then
+		cp "${u#file://}" "$TMP/$1"
+	elif have curl; then
+		curl -fsSL --retry 3 -o "$TMP/$1" "$u"
+	elif have wget; then
+		wget -q -O "$TMP/$1" "$u"
+	else
+		die "need curl or wget to download $u"
+	fi || die "download failed: $u"
+}
+
+sha256() {
+	if have sha256sum; then
+		sha256sum "$1" | awk '{print $1}'
+	elif have shasum; then
+		shasum -a 256 "$1" | awk '{print $1}'
+	elif have openssl; then
+		openssl dgst -sha256 "$1" | awk '{print $NF}'
+	else
+		die "need sha256sum, shasum or openssl to verify downloads"
+	fi
+}
+
+verify() { # NAME
+	want=$(awk -v n="$1" '$2 == n || $2 == "*"n {print $1; exit}' "$TMP/SHA256SUMS")
+	[ -n "$want" ] || die "$1 is not listed in SHA256SUMS"
+	got=$(sha256 "$TMP/$1")
+	[ "$got" = "$want" ] || die "checksum mismatch for $1 (expected $want, got $got)"
+}
+
+get() { # NAME
+	say "downloading $1"
+	fetch "$1"
+	verify "$1"
+}
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/lync-install.XXXXXX") || die "mktemp failed"
+# apt drops privileges to _apt when reading local .deb files.
+chmod 755 "$TMP"
+
+say "release: ${BASE_URL:-$VERSION ($REPO)}, arch: $ARCH, installer: $FAMILY"
+fetch SHA256SUMS
+
+# --- install -----------------------------------------------------------------
+install_manual() {
+	f=lync-linux-$ARCH.tar.gz
+	get "$f"
+	mkdir "$TMP/x"
+	tar -xzf "$TMP/$f" -C "$TMP/x"
+	install -d -m 0755 /usr/sbin /usr/bin /etc/lync /var/lib/lync/feeds /var/lib/lync/reports
+	install -m 0755 "$TMP/x/usr/sbin/lyncd" /usr/sbin/lyncd
+	install -m 0755 "$TMP/x/usr/bin/lync" /usr/bin/lync
+	if [ -e /etc/lync/lync.yaml ]; then
+		install -m 0644 "$TMP/x/etc/lync/lync.yaml" /etc/lync/lync.yaml.new
+		say "kept existing /etc/lync/lync.yaml (new default saved as lync.yaml.new)"
+	else
+		install -m 0644 "$TMP/x/etc/lync/lync.yaml" /etc/lync/lync.yaml
+	fi
+	if [ -d /run/systemd/system ] || have systemctl; then
+		install -d -m 0755 /usr/lib/systemd/system
+		install -m 0644 "$TMP/x/usr/lib/systemd/system/lync.service" /usr/lib/systemd/system/lync.service
+	fi
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload
+		systemctl enable lync.service >/dev/null 2>&1 || true
+		systemctl restart lync.service </dev/null || say "the service did not start; see: journalctl -u lync -n 50 --no-pager"
+	fi
+}
+
+case "$FAMILY" in
+deb)
+	f=lync-linux-$ARCH.deb
+	get "$f"
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "$TMP/$f" </dev/null
+	UNINSTALL="sudo apt-get remove lync   (purge also deletes /etc/lync and /var/lib/lync)"
+	;;
+rpm)
+	f=lync-linux-$ARCH.rpm
+	get "$f"
+	case "$PKGTOOL" in
+	dnf) dnf install -y "$TMP/$f" </dev/null ;;
+	yum) yum install -y "$TMP/$f" </dev/null ;;
+	zypper) zypper --non-interactive install --allow-unsigned-rpm "$TMP/$f" </dev/null ;;
+	esac
+	UNINSTALL="sudo $PKGTOOL remove lync"
+	;;
+apk)
+	f=lync-linux-$ARCH.apk
+	get "$f"
+	apk add --allow-untrusted "$TMP/$f" </dev/null
+	UNINSTALL="sudo apk del lync"
+	;;
+manual)
+	say "no apt/dnf/yum/zypper/apk found: installing the static binaries by hand"
+	install_manual
+	UNINSTALL="sudo systemctl disable --now lync; sudo rm -f /usr/sbin/lyncd /usr/bin/lync /usr/lib/systemd/system/lync.service; sudo rm -rf /etc/lync /var/lib/lync"
+	;;
+esac
+
+# --- report ------------------------------------------------------------------
+echo
+if [ -d /run/systemd/system ]; then
+	systemctl status lync --no-pager </dev/null || true
+else
+	say "systemd is not running here; start the daemon with '/usr/sbin/lyncd &' or run a single scan with 'lyncd -once'."
+fi
+echo
+lync version || die "lync is not on PATH after install"
+echo
+say "installed. Status: lync status | Scan now: lync scan | Reports: /var/lib/lync/reports/"
+say "config: /etc/lync/lync.yaml (restart lync after edits)"
+say "uninstall: $UNINSTALL"
