@@ -523,6 +523,13 @@ func listTokens(s string) map[string]bool {
 func (c cond) eval(o obs) (bool, bool) {
 	v, present := o[c.field]
 	if !present {
+		// An absent field is empty; every other operator can't decide.
+		switch c.op {
+		case "empty":
+			return true, true
+		case "not_empty":
+			return false, true
+		}
 		return false, false
 	}
 	lv := strings.ToLower(strings.TrimSpace(v))
@@ -550,6 +557,9 @@ func (c cond) eval(o obs) (bool, bool) {
 	case "not_empty":
 		return lv != "", true
 	case "lt", "le", "gt", "ge":
+		if lv == "" {
+			return false, true // unset never satisfies a numeric bound
+		}
 		n, ok := parseNum(v)
 		if !ok {
 			return false, false

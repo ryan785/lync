@@ -247,7 +247,7 @@ var baselinePacks = map[string]bool{
 	"hardening": true, "kernel": true, "accounts": true, "filesystem": true, "boot": true, "logging": true,
 	"sudo": true, "cron": true, "secrets": true, "login-defs": true, "mount": true, "pam": true, "network": true,
 	"modules": true, "firewall": true, "mac": true, "services-legacy": true, "updates": true, "time": true,
-	"tls": true, "audit": true, "eol": true,
+	"tls": true, "audit": true, "eol": true, "suid": true,
 }
 
 // TestPackLint enforces the authoring rules for every check.
@@ -301,6 +301,15 @@ func TestRedact(t *testing.T) {
 	for in, want := range cases {
 		if got := redact(in); got != want {
 			t.Errorf("redact(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseTimeSeconds(t *testing.T) {
+	cases := map[string]int{"30": 30, "30s": 30, "1m": 60, "1h": 3600, "": 0, "foo": 0}
+	for in, want := range cases {
+		if got := parseTimeSeconds(in); got != want {
+			t.Errorf("parseTimeSeconds(%q) = %d, want %d", in, got, want)
 		}
 	}
 }

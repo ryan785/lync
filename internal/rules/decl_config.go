@@ -132,6 +132,8 @@ func (env *evalEnv) probeConfig(ctx context.Context, p *Probe) probeOut {
 			if !ok {
 				if i == 0 {
 					env.setDefault(o, k, def, hasDef, d.loc)
+				} else {
+					o[norm(k)] = "" // unset secondary key: known and empty
 				}
 				continue
 			}

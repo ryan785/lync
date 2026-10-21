@@ -1,0 +1,159 @@
+pack: login-defs
+title: Password aging and quality defaults
+description: /etc/login.defs (account defaults used by useradd/passwd) and /etc/security/pwquality.conf (pam_pwquality password policy).
+aliases: [login-defs]
+category: config
+references:
+  - https://man7.org/linux/man-pages/man5/login.defs.5.html
+  - https://man7.org/linux/man-pages/man5/pwquality.conf.5.html
+checks:
+  - id: login-defs:pass-max-days
+    title: Passwords never or rarely expire
+    description: PASS_MAX_DAYS above 365 (or the 99999 default) means new accounts' passwords never have to change. Mostly a policy item; NIST 800-63B prefers no forced rotation when MFA and breach checks exist.
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: kv, path: /etc/login.defs, key: PASS_MAX_DAYS, default: "99999"}
+    expect: ["value le 365", "value gt 0"]
+    remediation: Set PASS_MAX_DAYS to your policy (e.g. 365) in /etc/login.defs; apply to existing users with chage --maxdays.
+    fix: "sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS 365/' /etc/login.defs"
+    tests:
+      pass: {files: {/etc/login.defs: "PASS_MAX_DAYS 90\n"}}
+      fail: [{files: {/etc/login.defs: "PASS_MAX_DAYS 99999\n"}}, {files: {/etc/login.defs: "UMASK 022\n"}}]
+
+  - id: login-defs:pass-min-days
+    title: Passwords can be changed again immediately
+    description: PASS_MIN_DAYS 0 lets users cycle through the password history at once and reuse their old password.
+    severity: low
+    tags: [cis]
+    probe: {type: config, format: kv, path: /etc/login.defs, key: PASS_MIN_DAYS, default: "0"}
+    expect: [value ge 1]
+    remediation: Set PASS_MIN_DAYS 1 in /etc/login.defs.
+    fix: "sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS 1/' /etc/login.defs"
+    tests:
+      pass: {files: {/etc/login.defs: "PASS_MIN_DAYS 1\n"}}
+      fail: {files: {/etc/login.defs: "PASS_MIN_DAYS\t0\n"}}
+
+  - id: login-defs:pass-warn-age
+    title: Short password expiry warning
+    description: Users get fewer than 7 days of warning before their password expires.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: kv, path: /etc/login.defs, key: PASS_WARN_AGE, default: "7"}
+    expect: [value ge 7]
+    remediation: Set PASS_WARN_AGE 7 in /etc/login.defs.
+    fix: "sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE 7/' /etc/login.defs"
+    tests:
+      pass: {files: {/etc/login.defs: "PASS_WARN_AGE 14\n"}}
+      fail: {files: {/etc/login.defs: "PASS_WARN_AGE 2\n"}}
+
+  - id: login-defs:umask
+    title: Default UMASK lets other users read new files
+    description: A login.defs UMASK weaker than 027 makes new home directories and files readable by every local user.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: kv, path: /etc/login.defs, key: UMASK, default: "022"}
+    expect: ["value bits_all 027"]
+    remediation: Set UMASK 027 in /etc/login.defs (and HOME_MODE 0750).
+    fix: "sed -i 's/^UMASK.*/UMASK 027/' /etc/login.defs"
+    tests:
+      pass: {files: {/etc/login.defs: "UMASK 077\n"}}
+      fail: {files: {/etc/login.defs: "UMASK 022\n"}}
+
+  - id: login-defs:home-mode
+    title: New home directories are readable by other users
+    description: HOME_MODE (or UMASK when unset) decides the mode of home directories created by useradd; 0755 exposes every user's files, SSH config and history to all local users.
+    severity: low
+    probe: {type: config, format: kv, path: /etc/login.defs, key: HOME_MODE}
+    where: [value not_empty]
+    expect: ["value bits_none 007"]
+    remediation: Set HOME_MODE 0750 (or 0700) in /etc/login.defs and chmod existing homes.
+    fix: "sed -i 's/^HOME_MODE.*/HOME_MODE 0750/' /etc/login.defs"
+    tests:
+      pass: [{files: {/etc/login.defs: "HOME_MODE 0700\n"}}, {files: {/etc/login.defs: "UMASK 022\n"}}]
+      fail: {files: {/etc/login.defs: "HOME_MODE 0755\n"}}
+
+  - id: login-defs:encrypt-method
+    title: Weak password hashing configured in login.defs
+    description: ENCRYPT_METHOD DES/MD5 makes passwords set with chpasswd/newusers trivially crackable.
+    severity: high
+    tags: [cis]
+    probe: {type: config, format: kv, path: /etc/login.defs, key: ENCRYPT_METHOD}
+    expect: ["value regex (?i)^(sha512|yescrypt|)$"]
+    remediation: Set ENCRYPT_METHOD SHA512 (or YESCRYPT on newer distributions) and have users reset passwords hashed with the old method.
+    fix: "sed -i 's/^ENCRYPT_METHOD.*/ENCRYPT_METHOD SHA512/' /etc/login.defs"
+    tests:
+      pass: [{files: {/etc/login.defs: "ENCRYPT_METHOD YESCRYPT\n"}}, {files: {/etc/login.defs: "UMASK 022\n"}}]
+      fail: {files: {/etc/login.defs: "ENCRYPT_METHOD MD5\n"}}
+
+  - id: login-defs:pw-minlen
+    title: Short minimum password length
+    description: pam_pwquality minlen below 12 accepts passwords that are quick to brute-force offline (default is 8 when unset).
+    severity: medium
+    tags: [cis]
+    applies_if: {file: /etc/security/pwquality.conf}
+    probe: {type: config, format: kv, path: [/etc/security/pwquality.conf, /etc/security/pwquality.conf.d/*.conf], key: minlen, default: "8"}
+    expect: [value ge 12]
+    remediation: Set minlen = 14 (CIS) or at least 12 in /etc/security/pwquality.conf.
+    fix: "echo 'minlen = 14' > /etc/security/pwquality.conf.d/50-lync.conf"
+    tests:
+      pass: {files: {/etc/security/pwquality.conf: "minlen = 14\n"}}
+      fail: {files: {/etc/security/pwquality.conf: "# minlen = 9\n"}}
+      na: {files: {}}
+
+  - id: login-defs:pw-dcredit
+    title: Password policy doesn't require a digit
+    description: dcredit >= 0 (and minclass below 3) doesn't force digits into new passwords.
+    severity: low
+    level: strict
+    applies_if: {file: /etc/security/pwquality.conf}
+    probe: {type: config, format: kv, path: [/etc/security/pwquality.conf, /etc/security/pwquality.conf.d/*.conf], key: dcredit, keys: [minclass], default: "0"}
+    expect: ["value lt 0 || minclass ge 3"]
+    remediation: Set dcredit = -1 or minclass = 4.
+    fix: "echo 'minclass = 4' > /etc/security/pwquality.conf.d/50-lync-class.conf"
+    tests:
+      pass: [{files: {/etc/security/pwquality.conf: "dcredit = -1\n"}}, {files: {/etc/security/pwquality.conf: "minclass = 4\n"}}]
+      fail: {files: {/etc/security/pwquality.conf: "dcredit = 1\n"}}
+
+  - id: login-defs:pw-ucredit
+    title: Password policy doesn't require an uppercase letter
+    description: ucredit >= 0 (and minclass below 3) doesn't force uppercase letters.
+    severity: low
+    level: strict
+    applies_if: {file: /etc/security/pwquality.conf}
+    probe: {type: config, format: kv, path: [/etc/security/pwquality.conf, /etc/security/pwquality.conf.d/*.conf], key: ucredit, keys: [minclass], default: "0"}
+    expect: ["value lt 0 || minclass ge 3"]
+    remediation: Set ucredit = -1 or minclass = 4.
+    fix: "echo 'minclass = 4' > /etc/security/pwquality.conf.d/50-lync-class.conf"
+    tests:
+      pass: {files: {/etc/security/pwquality.conf: "ucredit = -1\n"}}
+      fail: {files: {/etc/security/pwquality.conf: "minlen = 14\n"}}
+
+  - id: login-defs:pw-lcredit
+    title: Password policy doesn't require a lowercase letter
+    description: lcredit >= 0 (and minclass below 3) doesn't force lowercase letters.
+    severity: low
+    level: strict
+    applies_if: {file: /etc/security/pwquality.conf}
+    probe: {type: config, format: kv, path: [/etc/security/pwquality.conf, /etc/security/pwquality.conf.d/*.conf], key: lcredit, keys: [minclass], default: "0"}
+    expect: ["value lt 0 || minclass ge 3"]
+    remediation: Set lcredit = -1 or minclass = 4.
+    fix: "echo 'minclass = 4' > /etc/security/pwquality.conf.d/50-lync-class.conf"
+    tests:
+      pass: {files: {/etc/security/pwquality.conf: "lcredit=-1\n"}}
+      fail: {files: {/etc/security/pwquality.conf: "lcredit=0\n"}}
+
+  - id: login-defs:pw-ocredit
+    title: Password policy doesn't require a special character
+    description: ocredit >= 0 (and minclass below 3) doesn't force special characters.
+    severity: low
+    level: strict
+    applies_if: {file: /etc/security/pwquality.conf}
+    probe: {type: config, format: kv, path: [/etc/security/pwquality.conf, /etc/security/pwquality.conf.d/*.conf], key: ocredit, keys: [minclass], default: "0"}
+    expect: ["value lt 0 || minclass ge 3"]
+    remediation: Set ocredit = -1 or minclass = 4.
+    fix: "echo 'minclass = 4' > /etc/security/pwquality.conf.d/50-lync-class.conf"
+    tests:
+      pass: {files: {/etc/security/pwquality.conf: "minclass = 3\n"}}
+      fail: {files: {/etc/security/pwquality.conf: "ocredit = 0\nminclass = 1\n"}}

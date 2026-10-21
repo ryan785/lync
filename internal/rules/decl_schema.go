@@ -267,7 +267,7 @@ func parseCond(s string) (cond, error) {
 	c := cond{text: s}
 	f := strings.Fields(s)
 	if len(f) < 2 {
-		return c, fmt.Errorf("condition %q: want \"<field> <op> [value]\"", s)
+		return c, fmt.Errorf("condition %q: want \"<field> <op> [value]\" (inside a [flow, list] quote conditions that contain commas)", s)
 	}
 	c.field, c.op = f[0], f[1]
 	arity, ok := condOps[c.op]

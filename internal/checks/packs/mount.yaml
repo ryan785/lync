@@ -1,0 +1,215 @@
+pack: mount
+title: Mount options for temporary and data filesystems
+description: nodev/nosuid/noexec on world-writable and data mount points (read from /proc/mounts). Mount points that aren't separate filesystems are not reported, except by the strict separate-partition checks.
+aliases: [mount]
+category: filesystem
+references:
+  - https://man7.org/linux/man-pages/man8/mount.8.html
+test_base:
+  files:
+    /proc/mounts: |
+      /dev/sda1 / xfs rw,relatime 0 0
+checks:
+  - id: mount:tmp:nodev
+    title: /tmp mounted without nodev
+    description: Device files created in /tmp could give raw access to disks or memory.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /tmp}
+    expect: [options has_all nodev]
+    remediation: Add nodev to the /tmp entry in /etc/fstab (or tmp.mount) and remount.
+    fix: "mount -o remount,nodev /tmp"
+    tests:
+      pass: [{files: {/proc/mounts: "tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0\n"}}, {files: {}}]
+      fail: {files: {/proc/mounts: "tmpfs /tmp tmpfs rw,relatime 0 0\n"}}
+      skip: {files: {/proc/mounts: "!absent"}}
+
+  - id: mount:tmp:nosuid
+    title: /tmp mounted without nosuid
+    description: Setuid binaries dropped into /tmp would run with their owner's privileges.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /tmp}
+    expect: [options has_all nosuid]
+    remediation: Add nosuid to the /tmp mount options and remount.
+    fix: "mount -o remount,nosuid /tmp"
+    tests:
+      pass: {files: {/proc/mounts: "tmpfs /tmp tmpfs rw,nosuid,nodev 0 0\n"}}
+      fail: {files: {/proc/mounts: "tmpfs /tmp tmpfs rw,nodev 0 0\n"}}
+
+  - id: mount:tmp:noexec
+    title: /tmp mounted without noexec
+    description: Attackers commonly stage payloads in /tmp; noexec stops direct execution (scripts can still run through an interpreter). Some installers need exec on /tmp.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /tmp}
+    expect: [options has_all noexec]
+    remediation: Add noexec to the /tmp mount options and remount (point TMPDIR elsewhere for tools that need exec).
+    fix: "mount -o remount,noexec /tmp"
+    tests:
+      pass: {files: {/proc/mounts: "tmpfs /tmp tmpfs rw,noexec 0 0\n"}}
+      fail: {files: {/proc/mounts: "tmpfs /tmp tmpfs rw,nodev,nosuid 0 0\n"}}
+
+  - id: mount:var-tmp:nodev
+    title: /var/tmp mounted without nodev
+    description: /var/tmp is world-writable and survives reboots; device files there are dangerous.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /var/tmp}
+    expect: [options has_all nodev]
+    remediation: Add nodev to the /var/tmp mount options and remount.
+    fix: "mount -o remount,nodev /var/tmp"
+    tests:
+      pass: {files: {/proc/mounts: "/dev/sda3 /var/tmp xfs rw,nodev,nosuid,noexec 0 0\n"}}
+      fail: {files: {/proc/mounts: "/dev/sda3 /var/tmp xfs rw 0 0\n"}}
+
+  - id: mount:var-tmp:nosuid
+    title: /var/tmp mounted without nosuid
+    description: Setuid binaries in world-writable /var/tmp would run with their owner's privileges.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /var/tmp}
+    expect: [options has_all nosuid]
+    remediation: Add nosuid to the /var/tmp mount options and remount.
+    fix: "mount -o remount,nosuid /var/tmp"
+    tests:
+      pass: {files: {/proc/mounts: "/dev/sda3 /var/tmp xfs rw,nosuid 0 0\n"}}
+      fail: {files: {/proc/mounts: "/dev/sda3 /var/tmp xfs rw 0 0\n"}}
+
+  - id: mount:var-tmp:noexec
+    title: /var/tmp mounted without noexec
+    description: noexec stops direct execution of payloads staged in /var/tmp.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /var/tmp}
+    expect: [options has_all noexec]
+    remediation: Add noexec to the /var/tmp mount options and remount.
+    fix: "mount -o remount,noexec /var/tmp"
+    tests:
+      pass: {files: {/proc/mounts: "/dev/sda3 /var/tmp xfs rw,noexec 0 0\n"}}
+      fail: {files: {/proc/mounts: "/dev/sda3 /var/tmp xfs rw 0 0\n"}}
+
+  - id: mount:dev-shm:nodev
+    title: /dev/shm mounted without nodev
+    description: /dev/shm is world-writable shared memory; device files there are dangerous.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /dev/shm}
+    expect: [options has_all nodev]
+    remediation: Add nodev to /dev/shm in /etc/fstab (tmpfs /dev/shm tmpfs defaults,nodev,nosuid,noexec 0 0) and remount.
+    fix: "mount -o remount,nodev /dev/shm"
+    tests:
+      pass: {files: {/proc/mounts: "tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec 0 0\n"}}
+      fail: {files: {/proc/mounts: "tmpfs /dev/shm tmpfs rw,nosuid 0 0\n"}}
+
+  - id: mount:dev-shm:nosuid
+    title: /dev/shm mounted without nosuid
+    description: Setuid binaries placed in /dev/shm would run with their owner's privileges.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /dev/shm}
+    expect: [options has_all nosuid]
+    remediation: Add nosuid to /dev/shm and remount.
+    fix: "mount -o remount,nosuid /dev/shm"
+    tests:
+      pass: {files: {/proc/mounts: "tmpfs /dev/shm tmpfs rw,nosuid 0 0\n"}}
+      fail: {files: {/proc/mounts: "tmpfs /dev/shm tmpfs rw,nodev 0 0\n"}}
+
+  - id: mount:dev-shm:noexec
+    title: /dev/shm mounted without noexec
+    description: /dev/shm is a favourite staging area for fileless malware; noexec blocks direct execution.
+    severity: medium
+    tags: [cis]
+    probe: {type: mount, name: /dev/shm}
+    expect: [options has_all noexec]
+    remediation: Add noexec to /dev/shm and remount.
+    fix: "mount -o remount,noexec /dev/shm"
+    tests:
+      pass: {files: {/proc/mounts: "tmpfs /dev/shm tmpfs rw,noexec 0 0\n"}}
+      fail: {files: {/proc/mounts: "tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n"}}
+
+  - id: mount:home:nodev
+    title: /home mounted without nodev
+    description: Users shouldn't be able to create device files in their home directories.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: mount, name: /home}
+    expect: [options has_all nodev]
+    remediation: Add nodev to /home in /etc/fstab and remount.
+    fix: "mount -o remount,nodev /home"
+    tests:
+      pass: {files: {/proc/mounts: "/dev/sda4 /home xfs rw,nodev 0 0\n"}}
+      fail: {files: {/proc/mounts: "/dev/sda4 /home xfs rw 0 0\n"}}
+
+  - id: mount:home:nosuid
+    title: /home mounted without nosuid
+    description: Setuid binaries in home directories are almost never legitimate.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: mount, name: /home}
+    expect: [options has_all nosuid]
+    remediation: Add nosuid to /home in /etc/fstab and remount.
+    fix: "mount -o remount,nosuid /home"
+    tests:
+      pass: {files: {/proc/mounts: "/dev/sda4 /home xfs rw,nosuid 0 0\n"}}
+      fail: {files: {/proc/mounts: "/dev/sda4 /home xfs rw 0 0\n"}}
+
+  - id: mount:var:nodev
+    title: /var mounted without nodev
+    description: Device files have no place on /var.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: mount, name: /var}
+    expect: [options has_all nodev]
+    remediation: Add nodev to /var in /etc/fstab and remount.
+    fix: "mount -o remount,nodev /var"
+    tests:
+      pass: {files: {/proc/mounts: "/dev/sda5 /var xfs rw,nodev 0 0\n"}}
+      fail: {files: {/proc/mounts: "/dev/sda5 /var xfs rw 0 0\n"}}
+
+  - id: mount:var-log:noexec
+    title: /var/log mounted without nodev, nosuid or noexec
+    description: Log directories never need devices, setuid or executables.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: mount, name: [/var/log, /var/log/audit]}
+    expect: ["options has_all nodev,nosuid,noexec"]
+    remediation: Add nodev,nosuid,noexec to the mount options and remount.
+    fix: "mount -o remount,nodev,nosuid,noexec {path}"
+    tests:
+      pass: {files: {/proc/mounts: "/dev/sda6 /var/log xfs rw,nodev,nosuid,noexec 0 0\n"}}
+      fail: {files: {/proc/mounts: "/dev/sda6 /var/log xfs rw,nodev 0 0\n/dev/sda7 /var/log/audit xfs rw 0 0\n"}, findings: 2}
+
+  - id: mount:tmp:separate
+    title: /tmp is not a separate filesystem
+    description: Without its own filesystem, /tmp can't carry nodev/nosuid/noexec and a user filling it fills the root filesystem.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: mount, name: /tmp}
+    expect: [path eq /tmp]
+    missing: fail
+    missing_evidence: /tmp is part of the root filesystem (no /tmp entry in /proc/mounts)
+    remediation: Mount /tmp as tmpfs (systemctl enable --now tmp.mount) or a dedicated partition with nodev,nosuid,noexec.
+    fix: "systemctl enable --now tmp.mount"
+    tests:
+      pass: {files: {/proc/mounts: "tmpfs /tmp tmpfs rw 0 0\n"}}
+      fail: {files: {}}
+
+  - id: mount:proc:hidepid
+    title: Process list visible to all users
+    description: Without hidepid on /proc, every user can see every process's command line (which often contains passwords and tokens passed as arguments).
+    severity: low
+    level: strict
+    probe: {type: mount, name: /proc}
+    expect: ["options regex hidepid=(2|invisible)"]
+    remediation: Remount /proc with hidepid=2 (add gid=<monitoring group> for tools that need the full list); test with systemd services first.
+    fix: "mount -o remount,hidepid=2 /proc"
+    references: [https://docs.kernel.org/filesystems/proc.html#mount-options]
+    tests:
+      pass: {files: {/proc/mounts: "proc /proc proc rw,nosuid,nodev,noexec,hidepid=invisible 0 0\n"}}
+      fail: {files: {/proc/mounts: "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"}}

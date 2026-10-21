@@ -1,15 +1,16 @@
 pack: hardening
 title: Kernel and network sysctl hardening
-description: Runtime kernel parameters (/proc/sys) that harden memory layout, kernel information leaks, ptrace, BPF and the IPv4/IPv6 network stack.
+description: Runtime kernel parameters (/proc/sys) that harden memory layout, kernel information leaks, ptrace, BPF and the IPv4/IPv6 network stack. Values are read live; persist fixes in /etc/sysctl.d/.
 aliases: [hardening]
 category: hardening
 references:
   - https://docs.kernel.org/admin-guide/sysctl/kernel.html
   - https://docs.kernel.org/networking/ip-sysctl.html
 checks:
+  # ---- kernel ---------------------------------------------------------------
   - id: hardening:kernel.randomize_va_space
     title: ASLR is not fully enabled
-    description: kernel.randomize_va_space below 2 makes memory-corruption exploits much more reliable.
+    description: kernel.randomize_va_space below 2 leaves the heap (brk) or everything unrandomised, which makes memory-corruption exploits much more reliable.
     severity: high
     level: basic
     tags: [cis]
@@ -21,3 +22,543 @@ checks:
       pass: {files: {/proc/sys/kernel/randomize_va_space: "2\n"}}
       fail: {files: {/proc/sys/kernel/randomize_va_space: "0\n"}}
       skip: {files: {}}
+
+  - id: hardening:net.ipv4.tcp_syncookies
+    title: TCP SYN cookies disabled
+    description: Without SYN cookies a SYN flood exhausts the listen backlog and blocks new connections.
+    severity: medium
+    level: basic
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.tcp_syncookies}
+    expect: [value ge 1]
+    remediation: Enable SYN cookies.
+    fix: "echo 'net.ipv4.tcp_syncookies = 1' > /etc/sysctl.d/60-lync-syncookies.conf && sysctl -w net.ipv4.tcp_syncookies=1"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/tcp_syncookies: "1\n"}}
+      fail: {files: {/proc/sys/net/ipv4/tcp_syncookies: "0\n"}}
+
+  - id: hardening:kernel.kexec_load_disabled
+    title: kexec_load is not disabled
+    description: kexec lets root replace the running kernel without a reboot; disabling it only matters once an attacker already has root (e.g. to bypass module signing or lockdown), so this is defense in depth.
+    severity: low
+    level: basic
+    probe: {type: sysctl, name: kernel.kexec_load_disabled}
+    expect: [value eq 1]
+    remediation: Disable kexec_load if you don't use kexec/kdump fast reboots (this is one-way until reboot).
+    fix: "echo 'kernel.kexec_load_disabled = 1' > /etc/sysctl.d/60-lync-kexec.conf"
+    tests:
+      pass: {files: {/proc/sys/kernel/kexec_load_disabled: "1\n"}}
+      fail: {files: {/proc/sys/kernel/kexec_load_disabled: "0\n"}}
+
+  - id: hardening:kernel.unprivileged_bpf_disabled
+    title: Unprivileged eBPF is enabled
+    description: Unprivileged BPF programs have been the entry point of many local privilege-escalation bugs (e.g. CVE-2021-3490, CVE-2022-23222). 1 or 2 disables them.
+    severity: medium
+    level: basic
+    probe: {type: sysctl, name: kernel.unprivileged_bpf_disabled}
+    expect: [value ge 1]
+    remediation: Disable unprivileged BPF.
+    fix: "echo 'kernel.unprivileged_bpf_disabled = 1' > /etc/sysctl.d/60-lync-bpf.conf && sysctl -w kernel.unprivileged_bpf_disabled=1"
+    references: [https://docs.kernel.org/admin-guide/sysctl/kernel.html#unprivileged-bpf-disabled]
+    tests:
+      pass: [{files: {/proc/sys/kernel/unprivileged_bpf_disabled: "2\n"}}, {files: {/proc/sys/kernel/unprivileged_bpf_disabled: "1\n"}}]
+      fail: {files: {/proc/sys/kernel/unprivileged_bpf_disabled: "0\n"}}
+
+  - id: hardening:net.core.bpf_jit_harden
+    title: BPF JIT hardening is off
+    description: bpf_jit_harden=2 blinds JIT constants for all users, mitigating JIT-spraying attacks.
+    severity: low
+    level: strict
+    probe: {type: sysctl, name: net.core.bpf_jit_harden}
+    expect: [value eq 2]
+    remediation: Harden the BPF JIT for all users.
+    fix: "echo 'net.core.bpf_jit_harden = 2' > /etc/sysctl.d/60-lync-bpf-jit.conf"
+    tests:
+      pass: {files: {/proc/sys/net/core/bpf_jit_harden: "2\n"}}
+      fail: {files: {/proc/sys/net/core/bpf_jit_harden: "0\n"}}
+
+  - id: hardening:kernel.dmesg_restrict
+    title: Unprivileged users can read the kernel log
+    description: The kernel ring buffer leaks kernel addresses and hardware details that help local exploits.
+    severity: medium
+    probe: {type: sysctl, name: kernel.dmesg_restrict}
+    expect: [value eq 1]
+    remediation: Restrict dmesg to privileged users.
+    fix: "echo 'kernel.dmesg_restrict = 1' > /etc/sysctl.d/60-lync-dmesg.conf && sysctl -w kernel.dmesg_restrict=1"
+    tests:
+      pass: {files: {/proc/sys/kernel/dmesg_restrict: "1\n"}}
+      fail: {files: {/proc/sys/kernel/dmesg_restrict: "0\n"}}
+
+  - id: hardening:kernel.kptr_restrict
+    title: Kernel pointer addresses may leak
+    description: With kptr_restrict below 1, /proc/kallsyms and similar files expose kernel addresses to unprivileged users, defeating KASLR.
+    severity: medium
+    probe: {type: sysctl, name: kernel.kptr_restrict}
+    expect: [value ge 1]
+    remediation: Hide kernel pointers (2 hides them from root too).
+    fix: "echo 'kernel.kptr_restrict = 2' > /etc/sysctl.d/60-lync-kptr.conf && sysctl -w kernel.kptr_restrict=2"
+    tests:
+      pass: [{files: {/proc/sys/kernel/kptr_restrict: "2\n"}}, {files: {/proc/sys/kernel/kptr_restrict: "1\n"}}]
+      fail: {files: {/proc/sys/kernel/kptr_restrict: "0\n"}}
+
+  - id: hardening:kernel.yama.ptrace_scope
+    title: Any process can ptrace other processes of the same user
+    description: ptrace_scope 0 lets a compromised process attach to (and steal secrets from) every other process of that user, e.g. ssh-agent or a browser.
+    severity: medium
+    probe: {type: sysctl, name: kernel.yama.ptrace_scope}
+    expect: [value ge 1]
+    remediation: Restrict ptrace to descendants (1), admins (2) or nobody (3).
+    fix: "echo 'kernel.yama.ptrace_scope = 1' > /etc/sysctl.d/60-lync-ptrace.conf && sysctl -w kernel.yama.ptrace_scope=1"
+    references: [https://docs.kernel.org/admin-guide/LSM/Yama.html]
+    tests:
+      pass: {files: {/proc/sys/kernel/yama/ptrace_scope: "1\n"}}
+      fail: {files: {/proc/sys/kernel/yama/ptrace_scope: "0\n"}}
+      skip: {files: {}}
+
+  - id: hardening:kernel.perf_event_paranoid
+    title: Unprivileged users can use perf events
+    description: perf_event_paranoid below 2 allows unprivileged kernel profiling, a recurring source of local exploits and information leaks. Debian/Ubuntu kernels support 3 (no unprivileged perf at all).
+    severity: low
+    probe: {type: sysctl, name: kernel.perf_event_paranoid}
+    expect: [value ge 2]
+    remediation: Restrict perf events.
+    fix: "echo 'kernel.perf_event_paranoid = 2' > /etc/sysctl.d/60-lync-perf.conf && sysctl -w kernel.perf_event_paranoid=2"
+    tests:
+      pass: [{files: {/proc/sys/kernel/perf_event_paranoid: "2\n"}}, {files: {/proc/sys/kernel/perf_event_paranoid: "4\n"}}]
+      fail: {files: {/proc/sys/kernel/perf_event_paranoid: "-1\n"}}
+
+  - id: hardening:kernel.sysrq
+    title: Magic SysRq key fully enabled
+    description: kernel.sysrq=1 lets anyone at the console (or with access to /proc/sysrq-trigger via a misconfiguration) reboot, kill all processes or dump memory. Distribution defaults (16 or 176) allow only sync/remount/reboot and are acceptable.
+    severity: low
+    probe: {type: sysctl, name: kernel.sysrq}
+    expect: [value ne 1]
+    remediation: Disable SysRq or restrict it to the distribution default bitmask.
+    fix: "echo 'kernel.sysrq = 0' > /etc/sysctl.d/60-lync-sysrq.conf && sysctl -w kernel.sysrq=0"
+    tests:
+      pass: [{files: {/proc/sys/kernel/sysrq: "16\n"}}, {files: {/proc/sys/kernel/sysrq: "0\n"}}]
+      fail: {files: {/proc/sys/kernel/sysrq: "1\n"}}
+
+  - id: hardening:kernel.core_uses_pid
+    title: Core dump file names don't include the PID
+    description: Without the PID, core files overwrite each other, which hampers post-incident analysis. Irrelevant when core_pattern pipes to systemd-coredump.
+    severity: low
+    level: strict
+    probe: {type: sysctl, name: kernel.core_uses_pid}
+    expect: [value eq 1]
+    remediation: Include the PID in core file names (or use systemd-coredump).
+    fix: "echo 'kernel.core_uses_pid = 1' > /etc/sysctl.d/60-lync-core.conf"
+    tests:
+      pass: {files: {/proc/sys/kernel/core_uses_pid: "1\n"}}
+      fail: {files: {/proc/sys/kernel/core_uses_pid: "0\n"}}
+
+  - id: hardening:fs.suid_dumpable
+    title: Setuid programs can produce core dumps
+    description: fs.suid_dumpable other than 0 lets setuid programs dump core, which can write privileged memory (password hashes, keys) to disk.
+    severity: low
+    tags: [cis]
+    probe: {type: sysctl, name: fs.suid_dumpable}
+    expect: [value eq 0]
+    remediation: Disable core dumps for setuid programs (and set "* hard core 0" in /etc/security/limits.conf).
+    fix: "echo 'fs.suid_dumpable = 0' > /etc/sysctl.d/60-lync-coredump.conf && sysctl -w fs.suid_dumpable=0"
+    tests:
+      pass: {files: {/proc/sys/fs/suid_dumpable: "0\n"}}
+      fail: {files: {/proc/sys/fs/suid_dumpable: "2\n"}}
+
+  - id: hardening:kernel.modules_disabled
+    title: Kernel modules can still be loaded
+    description: Setting modules_disabled=1 after boot stops rootkits loading kernel modules; it also blocks legitimate hot-plug drivers, so it is a strict-only recommendation.
+    severity: low
+    level: strict
+    probe: {type: sysctl, name: kernel.modules_disabled}
+    expect: [value eq 1]
+    remediation: Set kernel.modules_disabled=1 late in boot once all needed modules are loaded (one-way until reboot).
+    fix: "sysctl -w kernel.modules_disabled=1"
+    tests:
+      pass: {files: {/proc/sys/kernel/modules_disabled: "1\n"}}
+      fail: {files: {/proc/sys/kernel/modules_disabled: "0\n"}}
+
+  - id: hardening:dev.tty.ldisc_autoload
+    title: Unprivileged users can autoload TTY line disciplines
+    description: Autoloading rarely used line-discipline modules has repeatedly exposed kernel bugs to unprivileged users (e.g. CVE-2017-2636).
+    severity: low
+    level: strict
+    probe: {type: sysctl, name: dev.tty.ldisc_autoload}
+    expect: [value eq 0]
+    remediation: Disable line-discipline autoloading.
+    fix: "echo 'dev.tty.ldisc_autoload = 0' > /etc/sysctl.d/60-lync-ldisc.conf"
+    tests:
+      pass: {files: {/proc/sys/dev/tty/ldisc_autoload: "0\n"}}
+      fail: {files: {/proc/sys/dev/tty/ldisc_autoload: "1\n"}}
+
+  - id: hardening:vm.unprivileged_userfaultfd
+    title: Unprivileged userfaultfd is allowed
+    description: userfaultfd lets unprivileged users stall kernel page faults, a common primitive for winning kernel race conditions.
+    severity: low
+    level: strict
+    probe: {type: sysctl, name: vm.unprivileged_userfaultfd}
+    expect: [value eq 0]
+    remediation: Restrict userfaultfd to privileged users.
+    fix: "echo 'vm.unprivileged_userfaultfd = 0' > /etc/sysctl.d/60-lync-uffd.conf"
+    references: [https://docs.kernel.org/admin-guide/sysctl/vm.html#unprivileged-userfaultfd]
+    tests:
+      pass: {files: {/proc/sys/vm/unprivileged_userfaultfd: "0\n"}}
+      fail: {files: {/proc/sys/vm/unprivileged_userfaultfd: "1\n"}}
+
+  - id: hardening:fs.protected_hardlinks
+    title: Hardlink protection disabled
+    description: Without protected_hardlinks users can hardlink to files they don't own, enabling classic /tmp race attacks against privileged programs.
+    severity: medium
+    probe: {type: sysctl, name: fs.protected_hardlinks}
+    expect: [value eq 1]
+    remediation: Enable hardlink protection.
+    fix: "echo 'fs.protected_hardlinks = 1' > /etc/sysctl.d/60-lync-links.conf && sysctl -w fs.protected_hardlinks=1"
+    references: [https://docs.kernel.org/admin-guide/sysctl/fs.html]
+    tests:
+      pass: {files: {/proc/sys/fs/protected_hardlinks: "1\n"}}
+      fail: {files: {/proc/sys/fs/protected_hardlinks: "0\n"}}
+
+  - id: hardening:fs.protected_symlinks
+    title: Symlink protection disabled
+    description: Without protected_symlinks privileged programs follow attacker-planted symlinks in sticky world-writable directories such as /tmp.
+    severity: medium
+    probe: {type: sysctl, name: fs.protected_symlinks}
+    expect: [value eq 1]
+    remediation: Enable symlink protection.
+    fix: "echo 'fs.protected_symlinks = 1' > /etc/sysctl.d/60-lync-links.conf && sysctl -w fs.protected_symlinks=1"
+    references: [https://docs.kernel.org/admin-guide/sysctl/fs.html]
+    tests:
+      pass: {files: {/proc/sys/fs/protected_symlinks: "1\n"}}
+      fail: {files: {/proc/sys/fs/protected_symlinks: "0\n"}}
+
+  - id: hardening:fs.protected_fifos
+    title: FIFO protection disabled
+    description: protected_fifos stops privileged programs from opening FIFOs owned by others in sticky world-writable directories (data-spoofing races).
+    severity: low
+    probe: {type: sysctl, name: fs.protected_fifos}
+    expect: [value ge 1]
+    remediation: Enable FIFO protection.
+    fix: "echo 'fs.protected_fifos = 1' > /etc/sysctl.d/60-lync-links.conf && sysctl -w fs.protected_fifos=1"
+    references: [https://docs.kernel.org/admin-guide/sysctl/fs.html]
+    tests:
+      pass: {files: {/proc/sys/fs/protected_fifos: "1\n"}}
+      fail: {files: {/proc/sys/fs/protected_fifos: "0\n"}}
+
+  - id: hardening:fs.protected_regular
+    title: Regular-file protection in sticky directories disabled
+    description: protected_regular stops O_CREAT opens of files owned by others in world-writable sticky directories, closing /tmp file-squatting races.
+    severity: low
+    probe: {type: sysctl, name: fs.protected_regular}
+    expect: [value ge 1]
+    remediation: Enable regular-file protection (2 also covers group-writable sticky directories).
+    fix: "echo 'fs.protected_regular = 2' > /etc/sysctl.d/60-lync-links.conf && sysctl -w fs.protected_regular=2"
+    references: [https://docs.kernel.org/admin-guide/sysctl/fs.html]
+    tests:
+      pass: {files: {/proc/sys/fs/protected_regular: "2\n"}}
+      fail: {files: {/proc/sys/fs/protected_regular: "0\n"}}
+
+  # ---- IPv4 -----------------------------------------------------------------
+  - id: hardening:net.ipv4.conf.all.rp_filter
+    title: Reverse-path filtering disabled
+    description: rp_filter drops packets whose source address could not be routed back through the receiving interface (spoofing protection). 1 (strict) or 2 (loose, multi-homed hosts) are both acceptable.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.all.rp_filter}
+    expect: ["value in 1,2"]
+    remediation: Enable reverse-path filtering.
+    fix: "echo 'net.ipv4.conf.all.rp_filter = 1' > /etc/sysctl.d/60-lync-net.conf && sysctl -w net.ipv4.conf.all.rp_filter=1"
+    tests:
+      pass: [{files: {/proc/sys/net/ipv4/conf/all/rp_filter: "1\n"}}, {files: {/proc/sys/net/ipv4/conf/all/rp_filter: "2\n"}}]
+      fail: {files: {/proc/sys/net/ipv4/conf/all/rp_filter: "0\n"}}
+
+  - id: hardening:net.ipv4.conf.default.rp_filter
+    title: Reverse-path filtering disabled for new interfaces
+    description: The default value applies to interfaces created later (VPN, containers).
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.default.rp_filter}
+    expect: ["value in 1,2"]
+    remediation: Enable reverse-path filtering by default.
+    fix: "echo 'net.ipv4.conf.default.rp_filter = 1' > /etc/sysctl.d/60-lync-net.conf && sysctl -w net.ipv4.conf.default.rp_filter=1"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/default/rp_filter: "1\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/default/rp_filter: "0\n"}}
+
+  - id: hardening:net.ipv4.conf.all.accept_redirects
+    title: ICMP redirects accepted
+    description: Accepting ICMP redirects lets anyone on the local network rewrite this host's routing table (man-in-the-middle).
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.all.accept_redirects}
+    expect: [value eq 0]
+    remediation: Ignore ICMP redirects.
+    fix: "echo 'net.ipv4.conf.all.accept_redirects = 0' > /etc/sysctl.d/60-lync-net.conf && sysctl -w net.ipv4.conf.all.accept_redirects=0"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/all/accept_redirects: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/all/accept_redirects: "1\n"}}
+
+  - id: hardening:net.ipv4.conf.default.accept_redirects
+    title: ICMP redirects accepted on new interfaces
+    description: The default value applies to interfaces created later.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.default.accept_redirects}
+    expect: [value eq 0]
+    remediation: Ignore ICMP redirects by default.
+    fix: "echo 'net.ipv4.conf.default.accept_redirects = 0' > /etc/sysctl.d/60-lync-net.conf && sysctl -w net.ipv4.conf.default.accept_redirects=0"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/default/accept_redirects: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/default/accept_redirects: "1\n"}}
+
+  - id: hardening:net.ipv4.conf.all.secure_redirects
+    title: Redirects from default gateways accepted
+    description: secure_redirects accepts ICMP redirects from listed gateways; spoofable on shared networks.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.all.secure_redirects}
+    expect: [value eq 0]
+    remediation: Ignore secure redirects.
+    fix: "echo 'net.ipv4.conf.all.secure_redirects = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/all/secure_redirects: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/all/secure_redirects: "1\n"}}
+
+  - id: hardening:net.ipv4.conf.default.secure_redirects
+    title: Redirects from default gateways accepted on new interfaces
+    description: The default value applies to interfaces created later.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.default.secure_redirects}
+    expect: [value eq 0]
+    remediation: Ignore secure redirects by default.
+    fix: "echo 'net.ipv4.conf.default.secure_redirects = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/default/secure_redirects: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/default/secure_redirects: "1\n"}}
+
+  - id: hardening:net.ipv4.conf.all.send_redirects
+    title: Host sends ICMP redirects
+    description: Only routers should send redirects; a host that does reveals topology and can be abused to redirect traffic.
+    severity: low
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.all.send_redirects}
+    expect: [value eq 0]
+    remediation: Stop sending redirects (unless this host is a router).
+    fix: "echo 'net.ipv4.conf.all.send_redirects = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/all/send_redirects: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/all/send_redirects: "1\n"}}
+
+  - id: hardening:net.ipv4.conf.default.send_redirects
+    title: New interfaces send ICMP redirects
+    description: The default value applies to interfaces created later.
+    severity: low
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.default.send_redirects}
+    expect: [value eq 0]
+    remediation: Stop sending redirects by default.
+    fix: "echo 'net.ipv4.conf.default.send_redirects = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/default/send_redirects: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/default/send_redirects: "1\n"}}
+
+  - id: hardening:net.ipv4.conf.all.accept_source_route
+    title: IPv4 source-routed packets accepted
+    description: Source routing lets the sender dictate the path, bypassing filtering that relies on routing.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.all.accept_source_route}
+    expect: [value eq 0]
+    remediation: Drop source-routed packets.
+    fix: "echo 'net.ipv4.conf.all.accept_source_route = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/all/accept_source_route: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/all/accept_source_route: "1\n"}}
+
+  - id: hardening:net.ipv4.conf.default.accept_source_route
+    title: IPv4 source routing accepted on new interfaces
+    description: The default value applies to interfaces created later.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.default.accept_source_route}
+    expect: [value eq 0]
+    remediation: Drop source-routed packets by default.
+    fix: "echo 'net.ipv4.conf.default.accept_source_route = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/default/accept_source_route: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/default/accept_source_route: "1\n"}}
+
+  - id: hardening:net.ipv4.conf.all.log_martians
+    title: Martian packets are not logged
+    description: Logging packets with impossible source addresses helps spot spoofing and misrouting.
+    severity: low
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.conf.all.log_martians}
+    expect: [value eq 1]
+    remediation: Log martian packets.
+    fix: "echo 'net.ipv4.conf.all.log_martians = 1' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/conf/all/log_martians: "1\n"}}
+      fail: {files: {/proc/sys/net/ipv4/conf/all/log_martians: "0\n"}}
+
+  - id: hardening:net.ipv4.icmp_echo_ignore_broadcasts
+    title: Host answers broadcast pings
+    description: Answering broadcast echo requests makes the host a Smurf-attack amplifier.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.icmp_echo_ignore_broadcasts}
+    expect: [value eq 1]
+    remediation: Ignore broadcast pings.
+    fix: "echo 'net.ipv4.icmp_echo_ignore_broadcasts = 1' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts: "1\n"}}
+      fail: {files: {/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts: "0\n"}}
+
+  - id: hardening:net.ipv4.icmp_ignore_bogus_error_responses
+    title: Bogus ICMP error responses are logged
+    description: Malformed ICMP error responses can flood the kernel log.
+    severity: low
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv4.icmp_ignore_bogus_error_responses}
+    expect: [value eq 1]
+    remediation: Ignore bogus ICMP error responses.
+    fix: "echo 'net.ipv4.icmp_ignore_bogus_error_responses = 1' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/icmp_ignore_bogus_error_responses: "1\n"}}
+      fail: {files: {/proc/sys/net/ipv4/icmp_ignore_bogus_error_responses: "0\n"}}
+
+  - id: hardening:net.ipv4.tcp_max_syn_backlog
+    title: Small TCP SYN backlog
+    description: A small half-open connection queue is easier to exhaust under SYN floods (with syncookies on this matters less).
+    severity: low
+    level: strict
+    probe: {type: sysctl, name: net.ipv4.tcp_max_syn_backlog}
+    expect: [value ge 1024]
+    remediation: Raise the SYN backlog.
+    fix: "echo 'net.ipv4.tcp_max_syn_backlog = 4096' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/tcp_max_syn_backlog: "4096\n"}}
+      fail: {files: {/proc/sys/net/ipv4/tcp_max_syn_backlog: "128\n"}}
+
+  - id: hardening:net.ipv4.tcp_rfc1337
+    title: TIME-WAIT assassination protection disabled
+    description: RFC 1337 protection drops RST packets for sockets in TIME-WAIT.
+    severity: low
+    level: strict
+    probe: {type: sysctl, name: net.ipv4.tcp_rfc1337}
+    expect: [value eq 1]
+    remediation: Enable RFC 1337 protection.
+    fix: "echo 'net.ipv4.tcp_rfc1337 = 1' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/tcp_rfc1337: "1\n"}}
+      fail: {files: {/proc/sys/net/ipv4/tcp_rfc1337: "0\n"}}
+
+  - id: hardening:net.ipv4.ip_forward
+    title: IPv4 forwarding enabled
+    description: Forwarding makes the host route packets between interfaces. Expected on routers, VPN gateways, Docker/Kubernetes and libvirt hosts, so only flagged when none of those are installed.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if:
+      not:
+        any:
+          - {package: [docker-ce, docker.io, moby-engine, podman, containerd.io, containerd, kubelet, k3s, libvirt-daemon, libvirt-daemon-system, wireguard-tools, openvpn, strongswan, frr, firewalld, lxd, incus]}
+          - {binary: [dockerd, kubelet, k3s, wg, openvpn, libvirtd, podman]}
+    probe: {type: sysctl, name: net.ipv4.ip_forward}
+    expect: [value eq 0]
+    remediation: Disable forwarding unless this host routes traffic.
+    fix: "echo 'net.ipv4.ip_forward = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv4/ip_forward: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv4/ip_forward: "1\n"}}
+      na: {files: {/proc/sys/net/ipv4/ip_forward: "1\n", /usr/bin/dockerd: ""}}
+
+  # ---- IPv6 -----------------------------------------------------------------
+  - id: hardening:net.ipv6.conf.all.accept_redirects
+    title: IPv6 ICMP redirects accepted
+    description: Accepting IPv6 redirects lets local attackers reroute traffic.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv6.conf.all.accept_redirects}
+    expect: [value eq 0]
+    remediation: Ignore IPv6 redirects.
+    fix: "echo 'net.ipv6.conf.all.accept_redirects = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv6/conf/all/accept_redirects: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv6/conf/all/accept_redirects: "1\n"}}
+      skip: {files: {}}
+
+  - id: hardening:net.ipv6.conf.default.accept_redirects
+    title: IPv6 ICMP redirects accepted on new interfaces
+    description: The default value applies to interfaces created later.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv6.conf.default.accept_redirects}
+    expect: [value eq 0]
+    remediation: Ignore IPv6 redirects by default.
+    fix: "echo 'net.ipv6.conf.default.accept_redirects = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv6/conf/default/accept_redirects: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv6/conf/default/accept_redirects: "1\n"}}
+
+  - id: hardening:net.ipv6.conf.all.accept_source_route
+    title: IPv6 source routing accepted
+    description: Source-routed IPv6 packets can bypass routing-based filtering.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv6.conf.all.accept_source_route}
+    expect: [value le 0]
+    remediation: Drop IPv6 source-routed packets.
+    fix: "echo 'net.ipv6.conf.all.accept_source_route = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: [{files: {/proc/sys/net/ipv6/conf/all/accept_source_route: "0\n"}}, {files: {/proc/sys/net/ipv6/conf/all/accept_source_route: "-1\n"}}]
+      fail: {files: {/proc/sys/net/ipv6/conf/all/accept_source_route: "1\n"}}
+
+  - id: hardening:net.ipv6.conf.default.accept_source_route
+    title: IPv6 source routing accepted on new interfaces
+    description: The default value applies to interfaces created later.
+    severity: medium
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv6.conf.default.accept_source_route}
+    expect: [value le 0]
+    remediation: Drop IPv6 source-routed packets by default.
+    fix: "echo 'net.ipv6.conf.default.accept_source_route = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv6/conf/default/accept_source_route: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv6/conf/default/accept_source_route: "1\n"}}
+
+  - id: hardening:net.ipv6.conf.all.forwarding
+    title: IPv6 forwarding enabled
+    description: The host routes IPv6 packets between interfaces. Expected on routers and container/VM hosts, which are excluded.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if:
+      not:
+        any:
+          - {package: [docker-ce, docker.io, moby-engine, podman, containerd.io, kubelet, k3s, libvirt-daemon, libvirt-daemon-system, wireguard-tools, openvpn, strongswan, frr, lxd, incus]}
+          - {binary: [dockerd, kubelet, k3s, wg, openvpn, libvirtd, podman]}
+    probe: {type: sysctl, name: net.ipv6.conf.all.forwarding}
+    expect: [value eq 0]
+    remediation: Disable IPv6 forwarding unless this host routes traffic.
+    fix: "echo 'net.ipv6.conf.all.forwarding = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv6/conf/all/forwarding: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv6/conf/all/forwarding: "1\n"}}
+      na: {files: {/proc/sys/net/ipv6/conf/all/forwarding: "1\n"}, packages: {podman: "4.9.4-1.el9"}}
+
+  - id: hardening:net.ipv6.conf.all.accept_ra
+    title: IPv6 router advertisements accepted
+    description: Hosts with static addressing should ignore router advertisements; rogue RAs let a local attacker become the default gateway. Hosts that rely on SLAAC need them.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: sysctl, name: net.ipv6.conf.all.accept_ra}
+    expect: [value eq 0]
+    remediation: Disable RA acceptance on statically addressed servers.
+    fix: "echo 'net.ipv6.conf.all.accept_ra = 0' > /etc/sysctl.d/60-lync-net.conf"
+    tests:
+      pass: {files: {/proc/sys/net/ipv6/conf/all/accept_ra: "0\n"}}
+      fail: {files: {/proc/sys/net/ipv6/conf/all/accept_ra: "1\n"}}

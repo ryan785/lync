@@ -132,16 +132,12 @@ func (e *Engine) Coverage() []finding.PackCoverage {
 // by callers building their own Engine.
 func DefaultRules() []Rule {
 	return []Rule{
-		NewHardeningRule(),
-		NewSSHConfigRule(),
 		NewAccountRule(),
 		NewFilesystemRule(),
 		NewNetworkRule(),
 		NewEOLRule(),
 		NewWebServerRule(),
 		NewFirewallRule(),
-		NewLoginDefsRule(),
-		NewMountRule(),
 		NewSELinuxRule(),
 		NewWebExposureRule(),
 		NewPHPRule(),
@@ -158,8 +154,6 @@ func DefaultRules() []Rule {
 // `lync checks` lists them and rules.disable can target them.
 func init() {
 	register(
-		CheckInfo{ID: "hardening", Rule: "hardening", Severity: finding.SeverityMedium, Description: "sysctl kernel/network hardening values"},
-		CheckInfo{ID: "ssh", Rule: "ssh-config", Severity: finding.SeverityHigh, Description: "sshd_config settings (root login, passwords, ciphers, MACs, KEX, forwarding...)"},
 		CheckInfo{ID: "account:uid0", Rule: "accounts", Severity: finding.SeverityCritical, Description: "Non-root account with UID 0"},
 		CheckInfo{ID: "account:empty-pwd", Rule: "accounts", Severity: finding.SeverityCritical, Description: "Account with an empty password hash"},
 		CheckInfo{ID: "fs:world-writable", Rule: "filesystem", Severity: finding.SeverityHigh, Description: "World-writable files under /etc, /usr/local, /opt"},
@@ -169,8 +163,6 @@ func init() {
 		CheckInfo{ID: "nginx", Rule: "web-server", Severity: finding.SeverityHigh, Description: "nginx.conf hardening: server_tokens, TLS protocols/ciphers, security headers, autoindex"},
 		CheckInfo{ID: "apache", Rule: "web-server", Severity: finding.SeverityHigh, Description: "Apache hardening: ServerTokens/Signature, TLS, TRACE, indexes"},
 		CheckInfo{ID: "firewall:none-active", Rule: "firewall", Severity: finding.SeverityHigh, Description: "No active host firewall"},
-		CheckInfo{ID: "login-defs", Rule: "login-defs", Severity: finding.SeverityLow, Description: "/etc/login.defs password aging and hashing"},
-		CheckInfo{ID: "mount", Rule: "mount", Severity: finding.SeverityLow, Description: "Missing nodev/nosuid/noexec on /tmp, /dev/shm, /var/tmp..."},
 		CheckInfo{ID: "mac", Rule: "mac", Severity: finding.SeverityMedium, Description: "SELinux/AppArmor disabled or permissive"},
 	)
 }

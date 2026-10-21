@@ -1,0 +1,466 @@
+pack: ssh
+title: OpenSSH server
+description: Effective sshd configuration (`sshd -T`, falling back to sshd_config with Include and first-value-wins semantics over OpenSSH defaults), host keys and authorized keys.
+aliases: [ssh-config]
+category: config
+applies_if:
+  any:
+    - {file: /etc/ssh/sshd_config}
+    - {binary: sshd}
+references:
+  - https://man.openbsd.org/sshd_config
+test_base:
+  files: {/etc/ssh/sshd_config: "# defaults\n"}
+checks:
+  - id: ssh:root-password-login
+    title: Root can log in over SSH with a password
+    description: PermitRootLogin yes with password (or keyboard-interactive) authentication exposes root to internet-wide password guessing. Critical without fail2ban/sshguard/crowdsec, High with one.
+    severity: critical
+    level: basic
+    probe: {type: config, format: sshd, key: permitrootlogin, keys: [passwordauthentication, kbdinteractiveauthentication, usepam]}
+    expect: ["permitrootlogin ne yes || passwordauthentication eq no"]
+    severity_if:
+      - if: {any: [{package: [fail2ban, fail2ban-server, sshguard, crowdsec]}, {unit_active: [fail2ban, sshguard, crowdsec]}]}
+        severity: high
+    remediation: Put keys in /root/.ssh/authorized_keys, then set `PermitRootLogin prohibit-password` and `PasswordAuthentication no` in the FIRST file sshd reads (e.g. /etc/ssh/sshd_config.d/00-lync.conf), run `sshd -t` and reload sshd. Install fail2ban with the sshd jail.
+    fix: "printf 'PermitRootLogin prohibit-password\\nPasswordAuthentication no\\n' > /etc/ssh/sshd_config.d/00-lync.conf && sshd -t && systemctl reload sshd"
+    references: [https://man.openbsd.org/sshd_config#PermitRootLogin]
+    tests:
+      pass:
+        - {files: {/etc/ssh/sshd_config: "PermitRootLogin yes\nPasswordAuthentication no\n"}}
+        - {files: {/etc/ssh/sshd_config: "PermitRootLogin prohibit-password\n"}}
+      fail:
+        - {files: {/etc/ssh/sshd_config: "PermitRootLogin yes\n"}}
+        - {name: sshd -T, cmds: {"sshd -T": "permitrootlogin yes\npasswordauthentication yes\nusepam yes\n"}}
+        - {name: with fail2ban, files: {/etc/ssh/sshd_config: "PermitRootLogin yes\n"}, packages: {fail2ban: "1.0.2-1"}, severity: high}
+      na: {files: {/etc/ssh/sshd_config: "!absent"}}
+
+  - id: ssh:permit-root-login
+    title: SSH allows direct root login
+    description: Any root login over SSH (even key-only) removes the audit trail of who became root; prohibit-password (key only) is the minimum, no is best.
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: config, format: sshd, key: permitrootlogin}
+    expect: [value ne yes]
+    remediation: Disable root password login; log in as a named user and use sudo.
+    fix: "echo 'PermitRootLogin no' > /etc/ssh/sshd_config.d/00-lync-root.conf && sshd -t && systemctl reload sshd"
+    tests:
+      pass:
+        - {files: {/etc/ssh/sshd_config: "PermitRootLogin no\n"}}
+        - {name: Match blocks are conditional, files: {/etc/ssh/sshd_config: "PermitRootLogin no\nMatch Address 10.0.0.0/8\n  PermitRootLogin yes\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "PermitRootLogin yes\n"}}
+
+  - id: ssh:empty-passwords
+    title: SSH accepts empty passwords
+    description: PermitEmptyPasswords yes lets accounts without a password log in remotely.
+    severity: critical
+    level: basic
+    tags: [cis]
+    probe: {type: config, format: sshd, key: permitemptypasswords}
+    expect: [value eq no]
+    remediation: Set PermitEmptyPasswords no.
+    fix: "echo 'PermitEmptyPasswords no' > /etc/ssh/sshd_config.d/00-lync-empty.conf && sshd -t && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "#PermitEmptyPasswords yes\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "PermitEmptyPasswords yes\n"}}
+
+  - id: ssh:protocol-1
+    title: SSH protocol 1 enabled
+    description: Protocol 1 is cryptographically broken. Only OpenSSH < 7.4 still honours the Protocol keyword.
+    severity: critical
+    level: basic
+    probe: {type: config, format: sshd, key: protocol, default: "2"}
+    expect: [value eq 2]
+    remediation: Remove `Protocol 1` (and upgrade OpenSSH; versions that support protocol 1 are long unsupported).
+    fix: "sed -i 's/^Protocol.*/Protocol 2/' /etc/ssh/sshd_config && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "Port 22\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "Protocol 2,1\n"}}
+
+  - id: ssh:host-based-auth
+    title: SSH host-based authentication enabled
+    description: HostbasedAuthentication trusts other hosts' identity (rhosts/shosts style); one compromised host compromises this one.
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: config, format: sshd, key: hostbasedauthentication}
+    expect: [value eq no]
+    remediation: Set HostbasedAuthentication no.
+    fix: "echo 'HostbasedAuthentication no' > /etc/ssh/sshd_config.d/00-lync-hostbased.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "HostbasedAuthentication no\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "HostbasedAuthentication yes\n"}}
+
+  - id: ssh:ignore-rhosts
+    title: SSH honours .rhosts files
+    description: IgnoreRhosts no makes sshd honour ~/.rhosts and ~/.shosts for host-based authentication.
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: config, format: sshd, key: ignorerhosts}
+    expect: [value ne no]
+    remediation: Set IgnoreRhosts yes.
+    fix: "echo 'IgnoreRhosts yes' > /etc/ssh/sshd_config.d/00-lync-rhosts.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "IgnoreRhosts no\n"}}
+
+  - id: ssh:password-auth
+    title: SSH accepts password authentication
+    description: Password logins are exposed to credential stuffing and brute force; keys (or keys plus a second factor) are far stronger. PasswordAuthentication defaults to yes when not set.
+    severity: medium
+    probe: {type: config, format: sshd, key: passwordauthentication}
+    expect: [value eq no]
+    remediation: Deploy SSH keys for every user, then set PasswordAuthentication no in the first file sshd reads.
+    fix: "echo 'PasswordAuthentication no' > /etc/ssh/sshd_config.d/00-lync-password.conf && sshd -t && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "PasswordAuthentication no\n"}}
+      fail:
+        - {files: {/etc/ssh/sshd_config: "#PasswordAuthentication no\n"}}
+        - {name: drop-in wins, files: {/etc/ssh/sshd_config: "Include /etc/ssh/sshd_config.d/*.conf\nPasswordAuthentication no\n", /etc/ssh/sshd_config.d/50-cloud-init.conf: "PasswordAuthentication yes\n"}}
+
+  - id: ssh:kbd-interactive-password
+    title: Passwords still accepted through keyboard-interactive auth
+    description: With UsePAM yes, KbdInteractiveAuthentication (ChallengeResponseAuthentication) yes lets PAM prompt for the password even though PasswordAuthentication is no.
+    severity: medium
+    probe: {type: config, format: sshd, key: passwordauthentication, keys: [kbdinteractiveauthentication, usepam]}
+    where: [passwordauthentication eq no, usepam eq yes]
+    expect: [kbdinteractiveauthentication eq no]
+    remediation: Set KbdInteractiveAuthentication no (ChallengeResponseAuthentication no on OpenSSH < 8.7) unless PAM-based MFA is intended.
+    fix: "echo 'KbdInteractiveAuthentication no' > /etc/ssh/sshd_config.d/00-lync-kbd.conf && systemctl reload sshd"
+    tests:
+      pass:
+        - {files: {/etc/ssh/sshd_config: "PasswordAuthentication no\nUsePAM yes\nChallengeResponseAuthentication no\n"}}
+        - {name: passwords on anyway, files: {/etc/ssh/sshd_config: "UsePAM yes\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "PasswordAuthentication no\nUsePAM yes\n"}}
+
+  - id: ssh:max-auth-tries
+    title: SSH MaxAuthTries is permissive
+    description: More than 4 attempts per connection makes brute force cheaper (default 6).
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: sshd, key: maxauthtries}
+    expect: [value le 4]
+    remediation: Set MaxAuthTries 4 or lower.
+    fix: "echo 'MaxAuthTries 4' > /etc/ssh/sshd_config.d/00-lync-maxauth.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "MaxAuthTries 3\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "\n"}}
+
+  - id: ssh:login-grace-time
+    title: SSH LoginGraceTime is long
+    description: Unauthenticated connections are held for LoginGraceTime seconds (default 120); long values let attackers exhaust MaxStartups slots.
+    severity: low
+    tags: [cis]
+    probe: {type: config, format: sshd, key: logingracetime}
+    expect: ["value le 60", "value gt 0"]
+    remediation: Set LoginGraceTime 60 or lower (not 0, which means unlimited).
+    fix: "echo 'LoginGraceTime 60' > /etc/ssh/sshd_config.d/00-lync-grace.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "LoginGraceTime 30s\n"}}
+      fail: [{files: {/etc/ssh/sshd_config: "LoginGraceTime 2m\n"}}, {files: {/etc/ssh/sshd_config: "LoginGraceTime 0\n"}}]
+
+  - id: ssh:client-alive-interval
+    title: Idle SSH sessions never time out
+    description: ClientAliveInterval 0 keeps abandoned sessions open indefinitely.
+    severity: low
+    tags: [cis]
+    probe: {type: config, format: sshd, key: clientaliveinterval}
+    expect: [value gt 0]
+    remediation: Set ClientAliveInterval 300 and ClientAliveCountMax 3 (or lower) to drop dead sessions.
+    fix: "printf 'ClientAliveInterval 300\\nClientAliveCountMax 3\\n' > /etc/ssh/sshd_config.d/00-lync-alive.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "ClientAliveInterval 5m\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "\n"}}
+
+  - id: ssh:x11-forwarding
+    title: SSH X11 forwarding enabled
+    description: X11 forwarding exposes the client's X server to the remote host; rarely needed on servers.
+    severity: low
+    tags: [cis]
+    probe: {type: config, format: sshd, key: x11forwarding}
+    expect: [value eq no]
+    remediation: Set X11Forwarding no.
+    fix: "echo 'X11Forwarding no' > /etc/ssh/sshd_config.d/00-lync-x11.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "X11Forwarding yes\n"}}
+
+  - id: ssh:x11-use-localhost
+    title: Forwarded X11 display listens on all interfaces
+    description: X11UseLocalhost no binds the forwarded display to the wildcard address, so other hosts can connect to the user's X session.
+    severity: medium
+    probe: {type: config, format: sshd, key: x11forwarding, keys: [x11uselocalhost]}
+    where: [x11forwarding eq yes]
+    expect: [x11uselocalhost ne no]
+    remediation: Set X11UseLocalhost yes (or disable X11Forwarding).
+    fix: "echo 'X11UseLocalhost yes' > /etc/ssh/sshd_config.d/00-lync-x11.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "X11Forwarding yes\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "X11Forwarding yes\nX11UseLocalhost no\n"}}
+
+  - id: ssh:log-level
+    title: SSH logging below INFO
+    description: QUIET, FATAL or ERROR drop login records needed for incident response; VERBOSE also logs key fingerprints.
+    severity: low
+    tags: [cis]
+    probe: {type: config, format: sshd, key: loglevel}
+    expect: ["value in info,verbose"]
+    remediation: Set LogLevel VERBOSE (or INFO).
+    fix: "echo 'LogLevel VERBOSE' > /etc/ssh/sshd_config.d/00-lync-log.conf && systemctl reload sshd"
+    tests:
+      pass: [{files: {/etc/ssh/sshd_config: "\n"}}, {files: {/etc/ssh/sshd_config: "LogLevel VERBOSE\n"}}]
+      fail: {files: {/etc/ssh/sshd_config: "LogLevel QUIET\n"}}
+
+  - id: ssh:agent-forwarding
+    title: SSH agent forwarding allowed
+    description: A compromised server can use a forwarded agent to authenticate as the user to other hosts.
+    severity: low
+    level: strict
+    probe: {type: config, format: sshd, key: allowagentforwarding}
+    expect: [value eq no]
+    remediation: Set AllowAgentForwarding no on servers that aren't jump hosts.
+    fix: "echo 'AllowAgentForwarding no' > /etc/ssh/sshd_config.d/00-lync-agent.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "AllowAgentForwarding no\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "\n"}}
+
+  - id: ssh:tcp-forwarding
+    title: SSH TCP forwarding allowed
+    description: Port forwarding lets any SSH user tunnel into internal networks or expose internal services.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: sshd, key: allowtcpforwarding}
+    expect: ["value in no,local"]
+    remediation: Set AllowTcpForwarding no unless users need tunnels.
+    fix: "echo 'AllowTcpForwarding no' > /etc/ssh/sshd_config.d/00-lync-fwd.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "AllowTcpForwarding no\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "\n"}}
+
+  - id: ssh:gateway-ports
+    title: SSH remote forwards bind to all interfaces
+    description: GatewayPorts yes lets any user publish a remote-forwarded port to the whole network.
+    severity: medium
+    probe: {type: config, format: sshd, key: gatewayports}
+    expect: [value eq no]
+    remediation: Set GatewayPorts no.
+    fix: "echo 'GatewayPorts no' > /etc/ssh/sshd_config.d/00-lync-gw.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: [{files: {/etc/ssh/sshd_config: "GatewayPorts yes\n"}}, {files: {/etc/ssh/sshd_config: "GatewayPorts clientspecified\n"}}]
+
+  - id: ssh:permit-tunnel
+    title: SSH tun/tap tunnelling allowed
+    description: PermitTunnel lets users create layer-2/3 VPN tunnels through sshd.
+    severity: low
+    level: strict
+    probe: {type: config, format: sshd, key: permittunnel}
+    expect: [value eq no]
+    remediation: Set PermitTunnel no.
+    fix: "echo 'PermitTunnel no' > /etc/ssh/sshd_config.d/00-lync-tun.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "PermitTunnel yes\n"}}
+
+  - id: ssh:permit-user-environment
+    title: Users can set environment variables for sshd sessions
+    description: PermitUserEnvironment yes processes ~/.ssh/environment and environment= key options, which can be used to bypass restrictions (e.g. LD_PRELOAD with forced commands).
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: sshd, key: permituserenvironment}
+    expect: [value eq no]
+    remediation: Set PermitUserEnvironment no.
+    fix: "echo 'PermitUserEnvironment no' > /etc/ssh/sshd_config.d/00-lync-env.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "PermitUserEnvironment yes\n"}}
+
+  - id: ssh:strict-modes
+    title: sshd does not check home and key file permissions
+    description: StrictModes no accepts authorized_keys files that other users can modify.
+    severity: medium
+    probe: {type: config, format: sshd, key: strictmodes}
+    expect: [value eq yes]
+    remediation: Set StrictModes yes and fix the file permissions it complains about.
+    fix: "echo 'StrictModes yes' > /etc/ssh/sshd_config.d/00-lync-strict.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "StrictModes no\n"}}
+
+  - id: ssh:weak-cipher
+    title: SSH offers weak cipher {value}
+    description: CBC-mode, RC4 (arcfour), 3DES, Blowfish and CAST ciphers are vulnerable to known attacks and are disabled by default in current OpenSSH.
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: sshd, key: ciphers, split: ","}
+    expect: ["value not_regex ^(3des-cbc|aes(128|192|256)-cbc|arcfour.*|blowfish-cbc|cast128-cbc|rijndael-cbc@lysator\\.liu\\.se)$"]
+    remediation: Remove {value} from Ciphers (or drop the Ciphers line to use OpenSSH defaults).
+    fix: "echo 'Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr' > /etc/ssh/sshd_config.d/00-lync-ciphers.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "Ciphers aes256-ctr,aes128-cbc,3des-cbc\n"}, findings: 2}
+
+  - id: ssh:weak-mac
+    title: SSH offers weak MAC {value}
+    description: MD5, RIPEMD-160 and truncated SHA-1 MACs are weak.
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: sshd, key: macs, split: ","}
+    expect: ["value not_regex ^(hmac-md5.*|hmac-sha1-96.*|hmac-ripemd160.*)$"]
+    remediation: Remove {value} from MACs.
+    fix: "echo 'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com' > /etc/ssh/sshd_config.d/00-lync-macs.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "MACs hmac-sha2-256,hmac-md5\n"}}
+
+  - id: ssh:weak-kex
+    title: SSH offers weak key exchange {value}
+    description: SHA-1 based Diffie-Hellman groups (group1, group14-sha1, group-exchange-sha1) are deprecated; group1 is 1024-bit (Logjam).
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: sshd, key: kexalgorithms, split: ","}
+    expect: ["value not_regex ^diffie-hellman-group(1|14|-exchange)-sha1$"]
+    remediation: Remove {value} from KexAlgorithms.
+    fix: "echo 'KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512' > /etc/ssh/sshd_config.d/00-lync-kex.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {cmds: {"sshd -T": "permitrootlogin no\nkexalgorithms curve25519-sha256,diffie-hellman-group1-sha1\n"}}
+
+  - id: ssh:dsa-host-key
+    title: sshd uses a DSA host key
+    description: DSA (ssh-dss) is limited to 1024-bit keys and was removed in OpenSSH 9.8.
+    severity: medium
+    probe: {type: content, path: [/etc/ssh/sshd_config, /etc/ssh/sshd_config.d/*.conf], regex: '(?i)^\s*HostKey\s+\S*dsa', combine: true}
+    expect: [match eq false]
+    remediation: Remove the HostKey line for ssh_host_dsa_key and delete the key; clients will use the ed25519/ecdsa/rsa keys.
+    fix: "sed -i '/ssh_host_dsa_key/d' /etc/ssh/sshd_config && rm -f /etc/ssh/ssh_host_dsa_key* && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "HostKey /etc/ssh/ssh_host_ed25519_key\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "HostKey /etc/ssh/ssh_host_dsa_key\n"}}
+
+  - id: ssh:host-key-perms
+    title: SSH private host key readable by other users
+    description: Anyone who reads a host private key can impersonate this server (man-in-the-middle). Keys must be 0600 root (RHEL allows 0640 group ssh_keys).
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: /etc/ssh/ssh_host_*_key}
+    expect: ["mode bits_none 0037", uid eq 0]
+    remediation: Restrict the host key to root.
+    fix: "chown root:root {path} && chmod 600 {path}"
+    tests:
+      pass:
+        - {files: {/etc/ssh/ssh_host_ed25519_key: "x"}, meta: {/etc/ssh/ssh_host_ed25519_key: "0600 0 0"}}
+        - {name: rhel ssh_keys group, files: {/etc/ssh/ssh_host_rsa_key: "x"}, meta: {/etc/ssh/ssh_host_rsa_key: "0640 0 994"}}
+      fail: {files: {/etc/ssh/ssh_host_ed25519_key: "x"}, meta: {/etc/ssh/ssh_host_ed25519_key: "0644 0 0"}}
+
+  - id: ssh:config-perms
+    title: sshd configuration writable by non-root users
+    description: Whoever can write sshd_config or a drop-in can enable root login or add an AuthorizedKeysCommand and become root.
+    severity: critical
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: [/etc/ssh/sshd_config, /etc/ssh/sshd_config.d/*.conf]}
+    expect: ["mode bits_none 0022", uid eq 0]
+    remediation: Make the file root-owned and not group/world-writable.
+    fix: "chown root:root {path} && chmod 600 {path}"
+    tests:
+      pass: {meta: {/etc/ssh/sshd_config: "0600 0 0"}}
+      fail: {meta: {/etc/ssh/sshd_config: "0666 0 0"}}
+
+  - id: ssh:authorized-key-dsa
+    title: authorized_keys accepts a DSA key
+    description: ssh-dss keys are 1024-bit and no longer accepted by OpenSSH 9.8+, so they are both weak and a sign of stale access.
+    severity: medium
+    probe: {type: authorized_keys}
+    expect: [type ne ssh-dss]
+    remediation: Replace the ssh-dss key in {file} with an ed25519 key.
+    fix: "sed -i '/^ssh-dss /d' {file}"
+    tests:
+      pass: {files: {/etc/passwd: "alice:x:1000:1000::/home/alice:/bin/bash\n", /home/alice/.ssh/authorized_keys: "ssh-ed25519 AAAAC3 alice\n"}}
+      fail: {files: {/etc/passwd: "alice:x:1000:1000::/home/alice:/bin/bash\n", /home/alice/.ssh/authorized_keys: "ssh-ed25519 AAAAC3 alice\nssh-dss AAAAB3 old\n"}}
+
+  - id: ssh:no-banner
+    title: SSH shows no warning banner
+    description: A legal warning banner is required by some policies (CIS, STIG); it has no technical security value.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: sshd, key: banner}
+    expect: [value ne none]
+    remediation: Set Banner /etc/issue.net and put your acceptable-use text there.
+    fix: "echo 'Banner /etc/issue.net' > /etc/ssh/sshd_config.d/00-lync-banner.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "Banner /etc/issue.net\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "\n"}}
+
+  - id: ssh:max-sessions
+    title: SSH MaxSessions is high
+    description: Many multiplexed sessions per connection make abuse of a stolen connection easier.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: sshd, key: maxsessions}
+    expect: [value le 10]
+    remediation: Set MaxSessions 10 or lower.
+    fix: "echo 'MaxSessions 4' > /etc/ssh/sshd_config.d/00-lync-sessions.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "MaxSessions 64\n"}}
+
+  - id: ssh:max-startups
+    title: SSH MaxStartups disabled or very high
+    description: MaxStartups limits concurrent unauthenticated connections; a very high limit makes connection-exhaustion DoS easy.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: sshd, key: maxstartups}
+    expect: ["value regex ^([1-9]|[1-9][0-9])(:|$)"]
+    remediation: Set MaxStartups 10:30:60.
+    fix: "echo 'MaxStartups 10:30:60' > /etc/ssh/sshd_config.d/00-lync-startups.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "MaxStartups 1000\n"}}
+
+  - id: ssh:gssapi-auth
+    title: SSH GSSAPI authentication enabled
+    description: GSSAPI adds attack surface and slows logins when Kerberos isn't used.
+    severity: low
+    level: strict
+    probe: {type: config, format: sshd, key: gssapiauthentication}
+    expect: [value eq no]
+    remediation: Set GSSAPIAuthentication no unless Kerberos is in use.
+    fix: "echo 'GSSAPIAuthentication no' > /etc/ssh/sshd_config.d/00-lync-gssapi.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "GSSAPIAuthentication yes\n"}}
+
+  - id: ssh:kerberos-auth
+    title: SSH Kerberos password authentication enabled
+    description: KerberosAuthentication validates passwords against the KDC; unneeded without Kerberos.
+    severity: low
+    level: strict
+    probe: {type: config, format: sshd, key: kerberosauthentication}
+    expect: [value eq no]
+    remediation: Set KerberosAuthentication no unless Kerberos is in use.
+    fix: "echo 'KerberosAuthentication no' > /etc/ssh/sshd_config.d/00-lync-krb.conf && systemctl reload sshd"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "KerberosAuthentication yes\n"}}
+
+  - id: ssh:access-restriction
+    title: SSH login not restricted to named users or groups
+    description: Without AllowUsers/AllowGroups (or Deny*), every account with a valid shell and credentials can log in, including service accounts that gain a shell by mistake.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: sshd, key: allowusers, keys: [allowgroups, denyusers, denygroups]}
+    expect: ["allowusers not_empty || allowgroups not_empty || denyusers not_empty || denygroups not_empty"]
+    remediation: Add `AllowGroups sshusers` (or AllowUsers) and put the accounts that need SSH in that group.
+    fix: "groupadd -f sshusers && echo 'AllowGroups sshusers' > /etc/ssh/sshd_config.d/00-lync-allow.conf"
+    tests:
+      pass: {files: {/etc/ssh/sshd_config: "AllowGroups wheel\n"}}
+      fail: {files: {/etc/ssh/sshd_config: "\n"}}
