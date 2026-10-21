@@ -1,0 +1,23 @@
+pack: hardening
+title: Kernel and network sysctl hardening
+description: Runtime kernel parameters (/proc/sys) that harden memory layout, kernel information leaks, ptrace, BPF and the IPv4/IPv6 network stack.
+aliases: [hardening]
+category: hardening
+references:
+  - https://docs.kernel.org/admin-guide/sysctl/kernel.html
+  - https://docs.kernel.org/networking/ip-sysctl.html
+checks:
+  - id: hardening:kernel.randomize_va_space
+    title: ASLR is not fully enabled
+    description: kernel.randomize_va_space below 2 makes memory-corruption exploits much more reliable.
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: sysctl, name: kernel.randomize_va_space}
+    expect: [value eq 2]
+    remediation: Enable full address-space layout randomisation.
+    fix: "echo 'kernel.randomize_va_space = 2' > /etc/sysctl.d/60-lync-aslr.conf && sysctl -w kernel.randomize_va_space=2"
+    tests:
+      pass: {files: {/proc/sys/kernel/randomize_va_space: "2\n"}}
+      fail: {files: {/proc/sys/kernel/randomize_va_space: "0\n"}}
+      skip: {files: {}}

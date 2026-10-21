@@ -79,6 +79,14 @@ func (e *Engine) Run(ctx context.Context, facts *collector.Facts) []finding.Find
 			// Toggles also apply to checks that don't guard themselves
 			// (the original rules), by finding-ID prefix.
 			if opts.Toggles.CheckEnabled(f.ID) {
+				if info, ok := CheckInfoOf(f.ID); ok {
+					if f.Check == "" {
+						f.Check = info.ID
+					}
+					if f.Pack == "" {
+						f.Pack = info.PackName()
+					}
+				}
 				out = append(out, f)
 				catalogMu.Lock()
 				perCheck[checkIDOf(f.ID)]++
@@ -109,6 +117,17 @@ func (e *Engine) Run(ctx context.Context, facts *collector.Facts) []finding.Find
 	return out
 }
 
+// Coverage returns the per-pack check coverage of the last Run (declarative
+// packs only; Go rules don't report applicability).
+func (e *Engine) Coverage() []finding.PackCoverage {
+	for _, r := range e.rules {
+		if c, ok := r.(interface{ Coverage() []finding.PackCoverage }); ok {
+			return c.Coverage()
+		}
+	}
+	return nil
+}
+
 // DefaultRules returns the rules shipped in-box. Custom rules can be added
 // by callers building their own Engine.
 func DefaultRules() []Rule {
@@ -131,6 +150,7 @@ func DefaultRules() []Rule {
 		NewAccessRule(),
 		NewRuntimesRule(),
 		NewVPNRule(),
+		NewDeclarativeRule(),
 	}
 }
 

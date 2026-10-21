@@ -59,4 +59,7 @@ type Options struct {
 	// CacheDir is where rules may cache network lookups (EOL data). ""
 	// keeps the historical /var/lib/lync/feeds/eol.
 	CacheDir string
+	// CheckDirs are searched for local check packs (*.yaml). nil uses
+	// DefaultCheckDirs; an empty non-nil slice loads none.
+	CheckDirs []string
 }

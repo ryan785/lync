@@ -58,4 +58,30 @@ type Finding struct {
 	FixedIn   string  `json:"fixed_in,omitempty"`
 	CVSS      float64 `json:"cvss,omitempty"`
 	Source    string  `json:"source,omitempty"`
+
+	// Check is the catalog check ID that produced a rules finding and Pack
+	// the check pack (or rule) it belongs to.
+	Check string `json:"check,omitempty"`
+	Pack  string `json:"pack,omitempty"`
+}
+
+// PackCoverage summarises one check pack in a scan: how many checks
+// applied to the host and how they ended.
+type PackCoverage struct {
+	Pack          string      `json:"pack"`
+	Title         string      `json:"title,omitempty"`
+	Checks        int         `json:"checks"`
+	Applicable    int         `json:"applicable"`
+	Passed        int         `json:"passed"`
+	Failed        int         `json:"failed"`
+	Skipped       int         `json:"skipped"`
+	NotApplicable int         `json:"not_applicable"`
+	Disabled      int         `json:"disabled"`
+	Skips         []CheckSkip `json:"skips,omitempty"`
+}
+
+// CheckSkip records why an applicable check could not decide.
+type CheckSkip struct {
+	Check  string `json:"check"`
+	Reason string `json:"reason"`
 }

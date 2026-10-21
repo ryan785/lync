@@ -143,6 +143,32 @@ func (h *Host) Stat(p string) (FileMeta, error) {
 	return m, nil
 }
 
+// StatFollow is Stat after resolving symlinks in the final path component
+// (inside Root, so an absolute target maps under the fixture/image root).
+// It returns the metadata of the target and the resolved host path. A
+// symlink's own mode (always 0777 on Linux) is never what callers see.
+func (h *Host) StatFollow(p string) (FileMeta, string, error) {
+	cur := p
+	for i := 0; i < 16; i++ {
+		m, err := h.Stat(cur)
+		if err != nil {
+			return m, cur, err
+		}
+		if m.Mode&fs.ModeSymlink == 0 {
+			return m, cur, nil
+		}
+		t, err := h.Readlink(cur)
+		if err != nil {
+			return FileMeta{}, cur, err
+		}
+		if !strings.HasPrefix(t, "/") {
+			t = path.Join(path.Dir(cur), t)
+		}
+		cur = path.Clean(t)
+	}
+	return FileMeta{}, cur, fs.ErrInvalid
+}
+
 // ReadDir lists a directory; names only, sorted.
 func (h *Host) ReadDir(p string) []fs.DirEntry {
 	es, err := os.ReadDir(h.P(p))
