@@ -187,6 +187,11 @@ They already cover OS packages plus language dependencies.
 | Rescan when a sync brings new CVEs | Full mode only: a sync doesn't trigger a scan. In lookup mode every scan (6 h, and after package changes) queries the sources directly. | 0.5 d |
 | NVD incremental merge | Each sync replaces the cache with the last 30/120 days, so older NVD-only CVEs vanish. Merge by `lastModified` instead. Get an NVD API key in the meantime. | 1 d |
 | OSV zip streamed to disk | Full mode only: `fetchEcosystem` reads the whole all.zip into memory (680 MB peak RSS on the Debian test host). Lookup mode, the default, peaks at 16-18 MB. | 0.5 d |
+| Go toolchain via OSV `stdlib` | Second `upstream.Provider`. Go binaries embed their toolchain version (`go version -m`); query OSV's `Go` ecosystem for package `stdlib` with the existing OSV client. | 1 d |
+| Python (CPython) upstream | pyenv / `/usr/local` / conda interpreters; data from python/cpython security advisories (no machine-readable range list yet: may need the PSF advisory database or OSV). | 2 d |
+| PHP upstream | Source-built / remi / ondrej / `php:` images; php.net releases JSON has security flags per release. Watch the remi/ondrej repos like NodeSource (exclude from the distro lookup). | 1-2 d |
+| `lync cve` for upstream Node CVEs | `lync cve CVE-...` only asks the distro sources; it should also consult the cached security-wg list and report affected Node installs. | 0.5 d |
+| Node in containers by process | Node processes inside containers are only counted through `node:<x.y.z>` image tags (inventory with `containers: true`); floating tags (`node:22`, `node:lts`) are skipped. Reading `/proc/<pid>/root` would give the real version. | 0.5 d |
 | dpkg version comparison | dpkg versions are compared with the RPM algorithm; ordering differs for `~`/`+`/letters in edge cases. Add a real dpkg vercmp for `Manager == "dpkg"`. | 0.5 d |
 
 ## 4. Daemon and packaging (P2/P3)

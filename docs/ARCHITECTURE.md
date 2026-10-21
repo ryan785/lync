@@ -96,6 +96,69 @@ set of API lookups made during the scan: see [Feed modes](#feed-modes)):
    channel was last told (state file) and sends new / fix available /
    resolved / digest messages by SMTP or webhook.
 
+## Upstream runtimes (Node.js)
+
+Distro advisories only describe distro builds, and OSV.dev has no
+ecosystem for runtime cores, so a Node.js installed with nvm, from a
+tarball, from NodeSource or in a `node:` image was invisible to the CVE
+section. `internal/upstream` covers it with the runtime project's own data.
+A `Provider` detects installs on a `rules.Host`, fetches advisory data and
+matches it into ordinary findings. Node.js is the first provider.
+
+- **Detection.** Lync looks in these places:
+  - running processes (`rules.ProcessExes`)
+  - `~/.nvm`, fnm, volta, asdf and mise directories under `/root` and `/home/*`
+  - `/usr/local/bin/node`, `/usr/local/n`, `/usr/local/lib/nodejs/*` and `/opt/*/bin/node`
+  - NodeSource packages (an installed `nodejs` whose version contains `nodesource`)
+  - `node:<x.y.z>` container images from the application inventory
+  
+  The version comes from the path or from `node --version`. Installs are
+  deduplicated by their real path. A distro `/usr/bin/node` is skipped
+  because distros backport fixes and stay on distro advisories.
+- **Data.** Three small files are cached under
+  `<cache_dir>/upstream/` and revalidated with `If-None-Match` /
+  `If-Modified-Since`. A copy younger than an hour is reused with no
+  request.
+  - `nodejs.org/dist/index.json`: the `security` flag of each release.
+  - `nodejs/security-wg` `vuln/core/index.json`: CVEs with node-semver
+    vulnerable/patched ranges.
+  - `nodejs/Release` `schedule.json`: EOL dates. They feed
+    `runtime:eol-node` and `container:eol-base`, and the built-in table is
+    the offline fallback.
+- **Matching.**
+  - `upstream:node-cve`: one finding per CVE whose vulnerable range
+    contains the version and whose patched range does not. `fixed_in` is the
+    first patched release on the install's major line. CVSS comes from the
+    NVD-by-id lookup, or from the cached NVD feed in full mode.
+  - `upstream:node-security-release`: a newer release on the same line is
+    flagged `security` in `index.json`. This is the same-day signal. When
+    CVE findings exist it is folded into them. It is kept only for a
+    security release newer than every CVE fix that no security-wg entry
+    names yet: the release-day gap.
+  - A security-wg entry with no fix on the install's line is not reported,
+    because `runtime:eol-node` covers EOL lines.
+- **Distro exclusion.** NodeSource packages are removed from the facts
+  given to the distro lookup and the matcher.
+- **Scan order.** The daemon detects and fetches before the rules run, so
+  the schedule reaches the EOL checks. It matches after the inventory, so
+  image tags are included.
+- **Data source.** Reports list the data source as `nodejs`. It follows
+  `osv` unless `feed.sources` lists `nodejs`, so `-sources none` turns it
+  off. A failed fetch while upstream installs exist marks the CVE section
+  incomplete.
+
+Finding shapes. Every finding has category `cve`, check pack `runtimes`
+and a `source` that starts with `nodejs`:
+
+| Check | ID | Package | Source |
+|---|---|---|---|
+| `upstream:node-cve` | `upstream:node-cve:<CVE>:<path>` | `node`, or `nodejs` for NodeSource | `nodejs-security-wg`, or `nodejs-security-wg+nvd` when NVD scored it |
+| `upstream:node-security-release` | `upstream:node-security-release:<path>` | `node`, or `nodejs` for NodeSource | `nodejs-release` |
+
+`<path>` is the binary path, or `image:<ref>` for a container image. The
+text report groups these findings per binary under "Upgrade Node.js", not
+in the OS package update command.
+
 ## Daemon process model
 
 The daemon's main goroutine sets up the world and blocks on the context.
@@ -323,6 +386,7 @@ internal/
   lookup/                lookup-mode orchestration + package-manager cross-check
   notify/                email / webhook notifications and their state
   inventory/             application components outside the package manager
+  upstream/              non-distro runtimes (Node.js) vs the runtime's own advisories
   matcher/               CVE matching + RPM-aware version comparison
   applicability/         per-distro judges that drop or downgrade findings
   rules/                 non-CVE rules engine (hardening.go, ssh_config.go, ...)

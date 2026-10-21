@@ -26,6 +26,8 @@ feed:
       # key, we pull a full 120-day window in seconds. Get a free key at
       # https://nvd.nist.gov/developers/request-an-api-key
       api_key: ""
+    # - name: nodejs # Upstream Node.js (nvm, tarballs, NodeSource, node: images) vs nodejs.org
+    #   enabled: true # releases + nodejs/security-wg CVEs. Follows osv when not listed here.
 
 report:
   dir: /var/lib/lync/reports

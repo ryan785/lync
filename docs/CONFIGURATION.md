@@ -90,6 +90,8 @@ feed:
     - name: nvd
       enabled: true
       api_key: ""
+    # - name: nodejs        # upstream Node.js data (nodejs.org index, security-wg, release
+    #   enabled: true       # schedule); follows osv when not listed. See ARCHITECTURE.md
     # - name: debian        # full mode: bulk tracker; lookup mode: served by osv
     #   enabled: true
     # - name: ubuntu
