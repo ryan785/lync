@@ -1,0 +1,243 @@
+pack: sudo
+title: sudo policy (/etc/sudoers and sudoers.d)
+description: Dangerous Defaults, rules that grant root to everyone or through shell-escaping commands, stale entries for deleted users and groups, and permissions on the policy files. Passwordless sudo is reported by account:sudo-nopasswd.
+category: config
+applies_if: {file: /etc/sudoers}
+references:
+  - https://www.sudo.ws/docs/man/sudoers.man/
+  - https://gtfobins.github.io/
+test_base:
+  files:
+    /etc/passwd: "root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n"
+    /etc/group: "root:x:0:\nwheel:x:10:alice\nalice:x:1000:\n"
+    /etc/sudoers: "Defaults env_reset\nroot ALL=(ALL) ALL\n%wheel ALL=(ALL) ALL\n"
+checks:
+  - id: sudo:no-authenticate
+    title: sudo never asks for a password (Defaults !authenticate)
+    description: "'Defaults !authenticate' turns every sudoers rule into a passwordless one: any compromised account listed in sudoers is root."
+    severity: high
+    probe: {type: sudoers}
+    where: ["kind eq defaults", 'setting regex !\s*authenticate\b']
+    expect_none: true
+    evidence: "{_loc}: {setting}"
+    remediation: Remove '!authenticate' from Defaults (use NOPASSWD only on narrowly scoped commands if needed).
+    fix: "visudo -f {file}"
+    tests:
+      pass: {}
+      fail: {files: {/etc/sudoers.d/90-x: "Defaults !authenticate\n", /etc/sudoers: "root ALL=(ALL) ALL\n#includedir /etc/sudoers.d\n"}}
+      na: {files: {/etc/sudoers: "!absent"}}
+
+  - id: sudo:visiblepw
+    title: sudo may read passwords with echo on (Defaults visiblepw)
+    description: visiblepw lets sudo prompt for a password on a terminal that echoes, e.g. through 'ssh host sudo cmd', exposing it on screen and in logs.
+    severity: medium
+    tags: [cis]
+    probe: {type: sudoers}
+    where: ["kind eq defaults", 'setting regex (^|[\s,])visiblepw\b']
+    expect_none: true
+    evidence: "{_loc}: {setting}"
+    remediation: Remove visiblepw (the default is !visiblepw).
+    fix: "visudo -f {file}"
+    tests:
+      pass: {files: {/etc/sudoers: "Defaults !visiblepw\nroot ALL=(ALL) ALL\n"}}
+      fail: {files: {/etc/sudoers: "Defaults visiblepw\nroot ALL=(ALL) ALL\n"}}
+
+  - id: sudo:no-env-reset
+    title: sudo keeps the caller's environment (Defaults !env_reset)
+    description: Without env_reset, variables like LD_PRELOAD, PATH, PYTHONPATH or PERL5LIB pass from the user into commands run as root, turning almost any sudo rule into full root.
+    severity: high
+    probe: {type: sudoers}
+    where: ["kind eq defaults", 'setting regex !\s*env_reset\b']
+    expect_none: true
+    evidence: "{_loc}: {setting}"
+    remediation: Remove '!env_reset'; whitelist individual safe variables with env_keep instead.
+    fix: "visudo -f {file}"
+    tests:
+      pass: {}
+      fail: {files: {/etc/sudoers: "Defaults !env_reset\nroot ALL=(ALL) ALL\n"}}
+
+  - id: sudo:env-keep-dangerous
+    title: sudo preserves a code-loading environment variable (env_keep)
+    description: Keeping LD_PRELOAD, LD_LIBRARY_PATH, PYTHONPATH, PERL5LIB, NODE_OPTIONS, BASH_ENV and similar lets the caller inject code into any command run through sudo.
+    severity: high
+    probe: {type: sudoers}
+    where:
+      - "kind eq defaults"
+      - 'setting regex env_keep\s*\+?=.*\b(LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PERL5LIB|PERL5OPT|PERLLIB|RUBYLIB|RUBYOPT|NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV)\b'
+    expect_none: true
+    evidence: "{_loc}: {setting}"
+    remediation: Remove the variable from env_keep.
+    fix: "visudo -f {file}"
+    references: [https://www.sudo.ws/docs/man/sudoers.man/#Command_environment]
+    tests:
+      pass: {files: {/etc/sudoers: "Defaults env_keep += \"LANG LC_ALL\"\nroot ALL=(ALL) ALL\n"}}
+      fail: {files: {/etc/sudoers: "Defaults env_keep += \"LD_LIBRARY_PATH HOME\"\nroot ALL=(ALL) ALL\n"}}
+
+  - id: sudo:timestamp-timeout
+    title: sudo credential cache lasts too long
+    description: timestamp_timeout above 15 minutes (or negative = forever) lets anything running in the user's terminal session reuse sudo without a password long after the admin walked away.
+    severity: low
+    tags: [cis]
+    probe: {type: sudoers}
+    where: ["kind eq defaults", 'setting regex timestamp_timeout\s*=\s*(-[0-9]+|1[6-9]|[2-9][0-9]|[0-9]{3,})\b']
+    expect_none: true
+    evidence: "{_loc}: {setting}"
+    remediation: Use the default (5) or at most 15 minutes.
+    fix: "visudo -f {file}"
+    tests:
+      pass: {files: {/etc/sudoers: "Defaults timestamp_timeout=5\nroot ALL=(ALL) ALL\n"}}
+      fail: {files: {/etc/sudoers: "Defaults timestamp_timeout=-1\nroot ALL=(ALL) ALL\n"}}
+
+  - id: sudo:use-pty
+    title: sudo does not run commands in a pseudo-terminal (use_pty)
+    description: Without use_pty a backgrounded process started via sudo can keep the terminal and inject keystrokes into the admin's session (TIOCSTI). sudo 1.9.14+ enables it by default.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: sudoers}
+    where: ["kind eq defaults", 'setting regex (^|[\s,])use_pty\b']
+    expect: ["kind eq defaults"]
+    missing: fail
+    missing_evidence: no 'Defaults use_pty' in sudoers
+    remediation: Add 'Defaults use_pty'.
+    fix: "echo 'Defaults use_pty' > /etc/sudoers.d/60-lync-use-pty && chmod 440 /etc/sudoers.d/60-lync-use-pty && visudo -c"
+    tests:
+      pass: {files: {/etc/sudoers: "Defaults use_pty\nroot ALL=(ALL) ALL\n"}}
+      fail: {files: {/etc/sudoers: "Defaults !use_pty\nroot ALL=(ALL) ALL\n"}}
+
+  - id: sudo:no-logfile
+    title: sudo has no dedicated log file
+    description: A separate sudo log (Defaults logfile=) keeps a record of privileged commands that is easy to review and ship.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: sudoers}
+    where: ["kind eq defaults", 'setting regex \blogfile\s*=']
+    expect: ["kind eq defaults"]
+    missing: fail
+    missing_evidence: no 'Defaults logfile=' in sudoers
+    remediation: Add a sudo log file.
+    fix: "echo 'Defaults logfile=\"/var/log/sudo.log\"' > /etc/sudoers.d/60-lync-logfile && chmod 440 /etc/sudoers.d/60-lync-logfile && visudo -c"
+    tests:
+      pass: {files: {/etc/sudoers: "Defaults logfile=\"/var/log/sudo.log\"\nroot ALL=(ALL) ALL\n"}}
+      fail: {}
+
+  - id: sudo:stale-entry
+    title: "Stale sudoers entry for a user that doesn't exist: {principal}"
+    description: A sudoers rule names a user that is not in /etc/passwd. If an account with that name is created later (by anyone able to add users, or by a package), it silently inherits the sudo rights. Not evaluated on hosts with a directory service (SSSD, LDAP, winbind) where the user may exist remotely.
+    severity: low
+    applies_if: {not: {package: [sssd, sssd-common, sssd-ldap, nslcd, libnss-ldapd, nss-pam-ldapd, winbind, freeipa-client, ipa-client]}}
+    probe: {type: sudoers}
+    where: ["kind eq spec", "principal_type eq user", "exists eq false"]
+    expect_none: true
+    evidence: "{_loc}: user {principal} not found in /etc/passwd"
+    remediation: Remove the rule or create the intended account deliberately.
+    fix: "visudo -f {file}"
+    tests:
+      pass: {files: {/etc/sudoers: "root ALL=(ALL) ALL\nalice ALL=(ALL) ALL\n"}}
+      fail: {files: {/etc/sudoers: "root ALL=(ALL) ALL\nbob ALL=(ALL) NOPASSWD: ALL\n"}, findings: 1}
+      na: {files: {/etc/sudoers: "bob ALL=(ALL) ALL\n"}, packages: {sssd: "2.9"}}
+
+  - id: sudo:stale-group
+    title: "Stale sudoers entry for a group that doesn't exist: {principal}"
+    description: A sudoers rule names a group that is not in /etc/group; whoever later creates that group (or a package that does) gets the sudo rights. Not evaluated on hosts with a directory service.
+    severity: low
+    applies_if: {not: {package: [sssd, sssd-common, sssd-ldap, nslcd, libnss-ldapd, nss-pam-ldapd, winbind, freeipa-client, ipa-client]}}
+    probe: {type: sudoers}
+    where: ["kind eq spec", "principal_type eq group", "exists eq false"]
+    expect_none: true
+    evidence: "{_loc}: group not found in /etc/group"
+    remediation: Remove the rule or create the intended group deliberately.
+    fix: "visudo -f {file}"
+    tests:
+      pass: {}
+      fail: {files: {/etc/sudoers: "root ALL=(ALL) ALL\n%admin ALL=(ALL) ALL\n"}}
+
+  - id: sudo:all-users
+    title: sudoers grants root to every user (ALL as the user list)
+    description: A rule whose user list is ALL lets every local account, including service accounts, run the listed commands as root.
+    severity: critical
+    level: basic
+    probe: {type: sudoers}
+    where: ["kind eq spec", "principal_type eq all"]
+    expect_none: true
+    evidence: "{_loc}"
+    severity_if:
+      - {when: "cmds_all eq false", severity: medium}
+    remediation: Replace ALL with a specific admin group.
+    fix: "visudo -f {file}"
+    tests:
+      pass: {}
+      fail:
+        - {files: {/etc/sudoers: "root ALL=(ALL) ALL\nALL ALL=(ALL) ALL\n"}, severity: critical}
+        - {files: {/etc/sudoers: "root ALL=(ALL) ALL\nALL ALL=(root) NOPASSWD: /usr/bin/uptime\n"}, severity: medium}
+
+  - id: sudo:shell-escape
+    title: sudo rule grants a command that can spawn a root shell
+    description: Shells, editors, pagers and container tools (and interpreters/find/tar/env without fixed arguments) let the user escape to a root shell (see GTFOBins), so the rule is equivalent to full root.
+    severity: medium
+    probe: {type: sudoers}
+    where:
+      - "kind eq spec"
+      - "principal ne root"
+      - "cmds_all eq false"
+      - 'cmds regex (^|[\s,:])\S*/(bash|sh|zsh|dash|ksh|csh|tcsh|fish|vi|vim|nvim|view|nano|ed|emacs|less|more|man|journalctl|docker|podman|kubectl)\b|(^|[\s,:])\S*/(find|awk|gawk|mawk|perl|python[0-9.]*|ruby|lua|php|node|tar|zip|rsync|env|tee|cp|dd|git|nmap)\s*(,|$)'
+    expect_none: true
+    evidence: "{_loc}"
+    remediation: Grant only the exact commands needed with fixed arguments; use sudoedit for file edits; treat docker/podman access as full root.
+    fix: "visudo -f {file}"
+    references: [https://gtfobins.github.io/]
+    tests:
+      pass: {files: {/etc/sudoers: "root ALL=(ALL) ALL\nalice ALL=(root) /usr/bin/systemctl restart app, /usr/sbin/shutdown -r now, /usr/bin/find /srv -name x\n"}}
+      fail:
+        - {files: {/etc/sudoers: "root ALL=(ALL) ALL\nalice ALL=(root) NOPASSWD: /usr/bin/vim /etc/hosts\n"}}
+        - {name: bare interpreter, files: {/etc/sudoers: "root ALL=(ALL) ALL\n%wheel ALL=(root) /usr/bin/python3\n"}}
+
+  - id: sudo:wildcard-args
+    title: sudo rule uses a wildcard in command arguments
+    description: Wildcards in sudoers arguments match spaces and extra options, so '/bin/cat /var/log/*' also allows '/bin/cat /var/log/x /etc/shadow'.
+    severity: low
+    probe: {type: sudoers}
+    where: ["kind eq spec", "principal ne root", "cmds_all eq false", "cmds contains *"]
+    expect_none: true
+    evidence: "{_loc}"
+    remediation: List exact arguments, or wrap the task in a root-owned script that validates its input.
+    fix: "visudo -f {file}"
+    references: [https://www.sudo.ws/docs/man/sudoers.man/#Wildcards]
+    tests:
+      pass: {files: {/etc/sudoers: "root ALL=(ALL) ALL\nalice ALL=(root) /usr/bin/tail -n 100 /var/log/app.log\n"}}
+      fail: {files: {/etc/sudoers: "root ALL=(ALL) ALL\nalice ALL=(root) /usr/bin/tail /var/log/*\n"}}
+
+  - id: sudo:sudoers-perms
+    title: /etc/sudoers has unsafe ownership or permissions
+    description: sudoers must be owned by root and mode 0440. A file writable by others hands out root (and sudo refuses to run when it detects it, breaking administration).
+    severity: medium
+    tags: [cis]
+    probe: {type: file, path: /etc/sudoers}
+    expect: ["uid eq 0", "mode perm_max 0440"]
+    severity_if:
+      - {when: "mode bits_any 0022", severity: high}
+      - {when: "uid ne 0", severity: high}
+    remediation: Restore ownership and mode.
+    fix: chown root:root /etc/sudoers && chmod 440 /etc/sudoers
+    tests:
+      pass: {meta: {/etc/sudoers: "0440 0 0"}}
+      fail:
+        - {meta: {/etc/sudoers: "0640 0 0"}, severity: medium}
+        - {meta: {/etc/sudoers: "0666 0 0"}, severity: high}
+
+  - id: sudo:sudoers-d-perms
+    title: sudoers.d drop-in has unsafe ownership or permissions
+    description: Drop-ins in /etc/sudoers.d must be root-owned and 0440; one writable by another user lets that user grant themselves root (sudo skips world-writable drop-ins but not group-writable ones owned by root's group).
+    severity: medium
+    probe: {type: file, path: /etc/sudoers.d/*}
+    where: ["type eq file"]
+    expect: ["uid eq 0", "mode perm_max 0440"]
+    severity_if:
+      - {when: "mode bits_any 0022", severity: high}
+      - {when: "uid ne 0", severity: high}
+    remediation: Restore ownership and mode on the drop-in.
+    fix: "chown root:root {path} && chmod 440 {path}"
+    tests:
+      pass: {files: {/etc/sudoers.d/90-cloud: "alice ALL=(ALL) ALL\n"}, meta: {/etc/sudoers.d/90-cloud: "0440 0 0"}}
+      fail: {files: {/etc/sudoers.d/90-cloud: "alice ALL=(ALL) ALL\n"}, meta: {/etc/sudoers.d/90-cloud: "0664 1000 1000"}, severity: high}

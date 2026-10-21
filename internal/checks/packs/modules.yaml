@@ -1,0 +1,237 @@
+pack: modules
+title: Unneeded kernel modules
+description: Rarely used filesystems and network protocols whose kernel modules can be auto-loaded by unprivileged users (mounting an image, opening a socket) and have a history of local privilege-escalation bugs. A module passes when it is not loaded and either disabled in modprobe.d or not shipped for the running kernel.
+category: hardening
+references:
+  - https://www.cisecurity.org/cis-benchmarks
+  - https://man7.org/linux/man-pages/man5/modprobe.d.5.html
+test_base:
+  files:
+    /proc/modules: "ext4 1036288 2 - Live 0x0000000000000000\n"
+    /proc/sys/kernel/osrelease: "6.1.0-test\n"
+    /lib/modules/6.1.0-test/modules.dep: |
+      kernel/fs/cramfs/cramfs.ko.xz:
+      kernel/fs/freevxfs/freevxfs.ko.xz:
+      kernel/fs/hfs/hfs.ko.xz:
+      kernel/fs/hfsplus/hfsplus.ko.xz:
+      kernel/fs/jffs2/jffs2.ko.xz:
+      kernel/fs/squashfs/squashfs.ko.xz:
+      kernel/fs/udf/udf.ko.xz:
+      kernel/drivers/usb/storage/usb-storage.ko.xz:
+      kernel/net/dccp/dccp.ko.xz:
+      kernel/net/sctp/sctp.ko.xz:
+      kernel/net/rds/rds.ko.xz:
+      kernel/net/tipc/tipc.ko.xz:
+      kernel/drivers/firewire/firewire-core.ko.xz:
+      kernel/net/bluetooth/bluetooth.ko.xz:
+      kernel/drivers/tty/n_hdlc.ko.xz:
+      kernel/fs/ext4/ext4.ko.xz:
+checks:
+  - id: module:cramfs
+    title: cramfs filesystem module can be loaded
+    description: cramfs is an obsolete compressed read-only filesystem; mounting crafted images exercises rarely audited kernel code.
+    severity: low
+    tags: [cis]
+    probe: {type: module, name: cramfs}
+    expect: ["usable eq false"]
+    remediation: Disable the module in modprobe.d and unload it.
+    fix: "printf 'install cramfs /bin/false\\nblacklist cramfs\\n' > /etc/modprobe.d/cramfs.conf && modprobe -r cramfs"
+    tests:
+      pass:
+        - {files: {/etc/modprobe.d/cramfs.conf: "install cramfs /bin/false\nblacklist cramfs\n"}}
+        - {name: not shipped, files: {/lib/modules/6.1.0-test/modules.dep: "kernel/fs/ext4/ext4.ko.xz:\n"}}
+      fail:
+        - {files: {/etc/modprobe.d/x.conf: "# nothing\n"}}
+        - {name: loaded despite blacklist, files: {/etc/modprobe.d/cramfs.conf: "install cramfs /bin/false\n", /proc/modules: "cramfs 16384 0 - Live 0x0\n"}}
+      skip: {files: {/proc/modules: "!absent"}}
+
+  - id: module:freevxfs
+    title: freevxfs filesystem module can be loaded
+    description: freevxfs (Veritas VxFS read-only driver) is unused on almost every server and adds attack surface for crafted images.
+    severity: low
+    tags: [cis]
+    probe: {type: module, name: freevxfs}
+    expect: ["usable eq false"]
+    remediation: Disable the module in modprobe.d.
+    fix: "printf 'install freevxfs /bin/false\\nblacklist freevxfs\\n' > /etc/modprobe.d/freevxfs.conf && modprobe -r freevxfs"
+    tests:
+      pass: {files: {/etc/modprobe.d/fs.conf: "install freevxfs /bin/true\n"}}
+      fail: {files: {/etc/modprobe.d/fs.conf: "blacklist freevxfs\n"}}
+
+  - id: module:hfs
+    title: hfs filesystem module can be loaded
+    description: The legacy Apple HFS driver is not needed on servers and has had memory-safety bugs reachable by mounting crafted images.
+    severity: low
+    tags: [cis]
+    probe: {type: module, name: hfs}
+    expect: ["usable eq false"]
+    remediation: Disable the module in modprobe.d.
+    fix: "printf 'install hfs /bin/false\\nblacklist hfs\\n' > /etc/modprobe.d/hfs.conf && modprobe -r hfs"
+    tests:
+      pass: {files: {/etc/modprobe.d/hfs.conf: "install hfs /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/other.conf: "options ext4 x=1\n"}}
+
+  - id: module:hfsplus
+    title: hfsplus filesystem module can be loaded
+    description: The Apple HFS+ driver is not needed on servers and has had memory-safety bugs reachable by mounting crafted images.
+    severity: low
+    tags: [cis]
+    probe: {type: module, name: hfsplus}
+    expect: ["usable eq false"]
+    remediation: Disable the module in modprobe.d.
+    fix: "printf 'install hfsplus /bin/false\\nblacklist hfsplus\\n' > /etc/modprobe.d/hfsplus.conf && modprobe -r hfsplus"
+    tests:
+      pass: {files: {/etc/modprobe.d/hfsplus.conf: "install hfsplus /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/hfs.conf: "install hfs /bin/false\n"}}
+
+  - id: module:jffs2
+    title: jffs2 filesystem module can be loaded
+    description: jffs2 is a flash filesystem for embedded devices; it has no use on servers.
+    severity: low
+    tags: [cis]
+    probe: {type: module, name: jffs2}
+    expect: ["usable eq false"]
+    remediation: Disable the module in modprobe.d.
+    fix: "printf 'install jffs2 /bin/false\\nblacklist jffs2\\n' > /etc/modprobe.d/jffs2.conf && modprobe -r jffs2"
+    tests:
+      pass: {files: {/etc/modprobe.d/jffs2.conf: "install jffs2 /usr/bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+
+  - id: module:squashfs
+    title: squashfs filesystem module can be loaded
+    description: squashfs is only needed for snaps, live images and some appliance formats; disabling it removes another crafted-image attack surface. Do not disable on hosts using snapd.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {not: {package: [snapd]}}
+    probe: {type: module, name: squashfs}
+    expect: ["usable eq false"]
+    remediation: Disable the module in modprobe.d if no snaps or squashfs images are used.
+    fix: "printf 'install squashfs /bin/false\\nblacklist squashfs\\n' > /etc/modprobe.d/squashfs.conf"
+    tests:
+      pass: {files: {/etc/modprobe.d/squashfs.conf: "install squashfs /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+      na: {packages: {snapd: "2.61-1"}}
+
+  - id: module:udf
+    title: udf filesystem module can be loaded
+    description: UDF is the DVD/optical filesystem; servers rarely need it (Azure images do use it for provisioning media).
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: module, name: udf}
+    expect: ["usable eq false"]
+    remediation: Disable the module in modprobe.d unless the platform provisions via UDF media.
+    fix: "printf 'install udf /bin/false\\nblacklist udf\\n' > /etc/modprobe.d/udf.conf"
+    tests:
+      pass: {files: {/etc/modprobe.d/udf.conf: "install udf /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+
+  - id: module:usb-storage
+    title: USB mass storage can be used
+    description: USB storage allows data exfiltration and malicious device attacks by anyone with physical access. Disable on servers that never need USB disks.
+    severity: low
+    tags: [cis]
+    probe: {type: module, name: usb-storage}
+    expect: ["usable eq false"]
+    remediation: Disable the usb-storage module.
+    fix: "printf 'install usb-storage /bin/false\\nblacklist usb-storage\\n' > /etc/modprobe.d/usb-storage.conf && modprobe -r usb-storage"
+    tests:
+      pass: {files: {/etc/modprobe.d/usb.conf: "install usb-storage /bin/true\n"}}
+      fail: {files: {/proc/modules: "usb_storage 81920 0 - Live 0x0\n"}}
+
+  - id: module:dccp
+    title: DCCP protocol module can be loaded
+    description: Any local user can auto-load DCCP by opening a socket; it has had several local root bugs (e.g. CVE-2017-6074) and is almost never used.
+    severity: medium
+    tags: [cis]
+    probe: {type: module, name: dccp}
+    expect: ["usable eq false"]
+    remediation: Disable the DCCP module.
+    fix: "printf 'install dccp /bin/false\\nblacklist dccp\\n' > /etc/modprobe.d/dccp.conf && modprobe -r dccp"
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2017-6074]
+    tests:
+      pass: {files: {/etc/modprobe.d/dccp.conf: "install dccp /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+
+  - id: module:sctp
+    title: SCTP protocol module can be loaded
+    description: SCTP can be auto-loaded by unprivileged socket calls and has had remotely and locally triggerable bugs; disable it unless the host runs SCTP services (telecom, some clusters).
+    severity: low
+    tags: [cis]
+    probe: {type: module, name: sctp}
+    expect: ["usable eq false"]
+    remediation: Disable the SCTP module if unused.
+    fix: "printf 'install sctp /bin/false\\nblacklist sctp\\n' > /etc/modprobe.d/sctp.conf"
+    tests:
+      pass: {files: {/etc/modprobe.d/sctp.conf: "install sctp /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+
+  - id: module:rds
+    title: RDS protocol module can be loaded
+    description: Reliable Datagram Sockets are auto-loadable by unprivileged users and have a history of local root exploits (CVE-2010-3904, CVE-2019-11815).
+    severity: medium
+    tags: [cis]
+    probe: {type: module, name: rds}
+    expect: ["usable eq false"]
+    remediation: Disable the RDS module.
+    fix: "printf 'install rds /bin/false\\nblacklist rds\\n' > /etc/modprobe.d/rds.conf && modprobe -r rds"
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2010-3904]
+    tests:
+      pass: {files: {/etc/modprobe.d/rds.conf: "install rds /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+
+  - id: module:tipc
+    title: TIPC protocol module can be loaded
+    description: TIPC is auto-loadable and had a remotely exploitable heap overflow (CVE-2021-43267); it is only used by some cluster software.
+    severity: medium
+    tags: [cis]
+    probe: {type: module, name: tipc}
+    expect: ["usable eq false"]
+    remediation: Disable the TIPC module.
+    fix: "printf 'install tipc /bin/false\\nblacklist tipc\\n' > /etc/modprobe.d/tipc.conf && modprobe -r tipc"
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2021-43267]
+    tests:
+      pass: {files: {/etc/modprobe.d/tipc.conf: "install tipc /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+
+  - id: module:firewire-core
+    title: FireWire module can be loaded
+    description: FireWire devices can perform DMA into host memory; servers without FireWire hardware should not load the stack.
+    severity: low
+    level: strict
+    probe: {type: module, name: firewire-core}
+    expect: ["usable eq false"]
+    remediation: Disable the FireWire core module.
+    fix: "printf 'install firewire-core /bin/false\\nblacklist firewire-core\\n' > /etc/modprobe.d/firewire.conf"
+    tests:
+      pass: {files: {/etc/modprobe.d/firewire.conf: "install firewire-core /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+
+  - id: module:bluetooth
+    title: Bluetooth stack can be loaded on a server
+    description: The Bluetooth stack has had remotely reachable bugs (BleedingTooth, CVE-2020-12351); servers rarely need it.
+    severity: low
+    level: strict
+    probe: {type: module, name: bluetooth}
+    expect: ["usable eq false"]
+    remediation: Disable Bluetooth on servers.
+    fix: "printf 'install bluetooth /bin/false\\nblacklist bluetooth\\n' > /etc/modprobe.d/bluetooth.conf"
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2020-12351]
+    tests:
+      pass: {files: {/etc/modprobe.d/bt.conf: "install bluetooth /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}
+
+  - id: module:n_hdlc
+    title: n_hdlc line discipline module can be loaded
+    description: n_hdlc can be loaded by any user through a TTY ioctl and had a local root race (CVE-2017-2636); it is only used for synchronous serial HDLC links.
+    severity: low
+    level: strict
+    probe: {type: module, name: n_hdlc}
+    expect: ["usable eq false"]
+    remediation: Disable the n_hdlc module.
+    fix: "printf 'install n_hdlc /bin/false\\nblacklist n_hdlc\\n' > /etc/modprobe.d/n_hdlc.conf"
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2017-2636]
+    tests:
+      pass: {files: {/etc/modprobe.d/n_hdlc.conf: "install n_hdlc /bin/false\n"}}
+      fail: {files: {/etc/modprobe.d/none.conf: ""}}

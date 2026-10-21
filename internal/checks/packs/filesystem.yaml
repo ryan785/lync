@@ -1,0 +1,261 @@
+pack: filesystem
+title: Account database, home directory and system file permissions
+description: Ownership and modes of the account databases (/etc/passwd, shadow, group, gshadow and their backups), shared temp directories, home directories and user dotfiles.
+category: filesystem
+references:
+  - https://www.cisecurity.org/cis-benchmarks
+  - https://man7.org/linux/man-pages/man5/shadow.5.html
+test_base:
+  files:
+    /etc/passwd: "root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n"
+    /etc/group: "root:x:0:\nshadow:x:42:\nalice:x:1000:\n"
+checks:
+  - id: fs:passwd-perms
+    title: /etc/passwd has unsafe ownership or permissions
+    description: /etc/passwd must be owned by root and not writable by group or others; anyone who can write it can add a UID 0 account.
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: /etc/passwd}
+    expect: ["uid eq 0", "mode perm_max 0644"]
+    severity_if:
+      - {when: "mode bits_any 0022", severity: critical}
+    remediation: Restore root ownership and mode 0644.
+    fix: chown root:root /etc/passwd && chmod 644 /etc/passwd
+    tests:
+      pass: {meta: {/etc/passwd: "0644 0 0"}}
+      fail:
+        - {meta: {/etc/passwd: "0666 0 0"}, severity: critical}
+        - {meta: {/etc/passwd: "0644 1000 0"}, severity: high}
+
+  - id: fs:group-perms
+    title: /etc/group has unsafe ownership or permissions
+    description: /etc/group must be owned by root and not writable by group or others; writing it grants membership in privileged groups (wheel, sudo, docker).
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: /etc/group}
+    expect: ["uid eq 0", "mode perm_max 0644"]
+    severity_if:
+      - {when: "mode bits_any 0022", severity: critical}
+    remediation: Restore root ownership and mode 0644.
+    fix: chown root:root /etc/group && chmod 644 /etc/group
+    tests:
+      pass: {meta: {/etc/group: "0644 0 0"}}
+      fail: {meta: {/etc/group: "0664 0 1000"}, severity: critical}
+
+  - id: fs:shadow-perms
+    title: /etc/shadow is readable or writable beyond root and the shadow group
+    description: /etc/shadow holds password hashes. It must be owned by root, group root or shadow, mode 0640 or stricter (Debian/Ubuntu ship root:shadow 0640, RHEL root:root 0000).
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: /etc/shadow}
+    expect: ["uid eq 0", "mode perm_max 0640", "group in root,shadow"]
+    severity_if:
+      - {when: "mode bits_any 0006", severity: critical}
+    remediation: Restore ownership and mode (Debian/Ubuntu root:shadow 0640, RHEL family root:root 0000), then rotate any passwords whose hashes may have been read.
+    fix: "chown root:shadow /etc/shadow && chmod 640 /etc/shadow   # RHEL: chown root:root /etc/shadow && chmod 000 /etc/shadow"
+    tests:
+      pass:
+        - {name: debian, meta: {/etc/shadow: "0640 0 42"}}
+        - {name: rhel, meta: {/etc/shadow: "0000 0 0"}}
+      fail:
+        - {meta: {/etc/shadow: "0644 0 42"}, severity: critical}
+        - {meta: {/etc/shadow: "0640 0 1000"}, severity: high}
+
+  - id: fs:gshadow-perms
+    title: /etc/gshadow is readable or writable beyond root and the shadow group
+    description: /etc/gshadow holds group passwords and administrators; it must be root-owned, group root or shadow, mode 0640 or stricter.
+    severity: high
+    tags: [cis]
+    probe: {type: file, path: /etc/gshadow}
+    expect: ["uid eq 0", "mode perm_max 0640", "group in root,shadow"]
+    severity_if:
+      - {when: "mode bits_any 0006", severity: critical}
+    remediation: Restore ownership and mode (Debian/Ubuntu root:shadow 0640, RHEL family root:root 0000).
+    fix: chown root:shadow /etc/gshadow && chmod 640 /etc/gshadow
+    tests:
+      pass: {meta: {/etc/gshadow: "0640 0 42"}}
+      fail: {meta: {/etc/gshadow: "0666 0 0"}, severity: critical}
+
+  - id: fs:passwd-backup-perms
+    title: Backup /etc/passwd- or /etc/group- is writable by non-root users
+    description: The backup copies written by shadow-utils must be protected like the originals.
+    severity: medium
+    tags: [cis]
+    probe: {type: file, path: [/etc/passwd-, /etc/group-]}
+    expect: ["uid eq 0", "mode perm_max 0644"]
+    severity_if:
+      - {when: "mode bits_any 0022", severity: high}
+    remediation: Restore root ownership and mode 0644 (or stricter) on the backup files.
+    fix: "chown root:root {path} && chmod 644 {path}"
+    tests:
+      pass: {meta: {/etc/passwd-: "0600 0 0", /etc/group-: "0644 0 0"}}
+      fail: {meta: {/etc/passwd-: "0666 0 0", /etc/group-: "0644 0 0"}, severity: high, findings: 1}
+
+  - id: fs:shadow-backup-perms
+    title: Backup /etc/shadow- or /etc/gshadow- is readable beyond root and the shadow group
+    description: /etc/shadow- and /etc/gshadow- contain the previous password hashes and need the same protection as /etc/shadow.
+    severity: high
+    tags: [cis]
+    probe: {type: file, path: [/etc/shadow-, /etc/gshadow-]}
+    expect: ["uid eq 0", "mode perm_max 0640", "group in root,shadow"]
+    severity_if:
+      - {when: "mode bits_any 0006", severity: critical}
+    remediation: Restore ownership and mode like /etc/shadow, and rotate passwords if the hashes were exposed.
+    fix: "chown root:shadow {path} && chmod 640 {path}"
+    tests:
+      pass: {meta: {/etc/shadow-: "0640 0 42", /etc/gshadow-: "0000 0 0"}}
+      fail: {meta: {/etc/shadow-: "0644 0 0"}, severity: critical}
+
+  - id: fs:opasswd-perms
+    title: /etc/security/opasswd is readable by non-root users
+    description: opasswd stores old password hashes for pam_pwhistory/pam_unix remember=; it must be root-only (0600).
+    severity: medium
+    tags: [cis]
+    probe: {type: file, path: /etc/security/opasswd}
+    expect: ["uid eq 0", "mode perm_max 0600"]
+    remediation: Restrict the password history file to root.
+    fix: chown root:root /etc/security/opasswd && chmod 600 /etc/security/opasswd
+    tests:
+      pass: {meta: {/etc/security/opasswd: "0600 0 0"}}
+      fail: {meta: {/etc/security/opasswd: "0644 0 0"}}
+
+  - id: fs:tmp-sticky
+    title: World-writable temp directory without the sticky bit
+    description: /tmp, /var/tmp and /dev/shm are world-writable by design; without the sticky bit any user can delete or replace other users' files (symlink and race attacks).
+    severity: high
+    level: basic
+    probe: {type: file, path: [/tmp, /var/tmp, /dev/shm]}
+    where: ["type eq dir", "mode bits_any 0002"]
+    expect: ["sticky eq true"]
+    remediation: Set the sticky bit on shared temp directories.
+    fix: "chmod 1777 {path}"
+    tests:
+      pass: {meta: {/tmp: "d1777 0 0", /var/tmp: "d1777 0 0"}}
+      fail: {meta: {/tmp: "d1777 0 0", /var/tmp: "d0777 0 0"}, findings: 1}
+
+  - id: fs:root-home-perms
+    title: /root is accessible to other users
+    description: Root's home directory holds shell history, SSH keys and credentials; it should be owned by root with no access for others.
+    severity: medium
+    tags: [cis]
+    probe: {type: file, path: /root}
+    expect: ["uid eq 0", "mode bits_none 0007"]
+    severity_if:
+      - {when: "mode bits_any 0002", severity: critical}
+    remediation: Restrict /root to its owner.
+    fix: chown root:root /root && chmod 700 /root
+    tests:
+      pass: {meta: {/root: "d0700 0 0"}}
+      fail:
+        - {meta: {/root: "d0755 0 0"}, severity: medium}
+        - {meta: {/root: "d0777 0 0"}, severity: critical}
+
+  - id: fs:home-world-writable
+    title: World-writable home directory
+    description: Anyone can drop a .bashrc, .profile or .ssh/authorized_keys into a world-writable home and run code as (or log in as) that user.
+    severity: high
+    probe: {type: walk, roots: /home, max_depth: 1, file_type: dir}
+    where: ["path ne /home"]
+    expect: ["mode bits_none 0002"]
+    remediation: Remove write access for others from the home directory.
+    fix: "chmod o-w {path}"
+    tests:
+      pass: {meta: {/home/alice: "d0750 1000 1000"}}
+      fail: {meta: {/home/alice: "d0777 1000 1000"}}
+
+  - id: fs:home-world-readable
+    title: Home directory readable by all users
+    description: Home directories readable by other users expose shell history, application configs and keys left with loose modes. Debian and older Ubuntu default to 0755.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: walk, roots: /home, max_depth: 1, file_type: dir}
+    where: ["path ne /home"]
+    expect: ["mode bits_none 0007"]
+    remediation: Restrict home directories to their owner (and group); set HOME_MODE 0750 in /etc/login.defs for new users.
+    fix: "chmod 750 {path}"
+    tests:
+      pass: {meta: {/home/alice: "d0750 1000 1000"}}
+      fail: {meta: {/home/alice: "d0755 1000 1000"}}
+
+  - id: fs:dotfile-world-writable
+    title: World-writable shell startup file in a home directory
+    description: A world-writable .bashrc/.profile lets any local user run commands as that user (or as root for /root) at the next login.
+    severity: high
+    probe:
+      type: walk
+      roots: [/root, /home]
+      max_depth: 2
+      file_type: file
+      match: [.bashrc, .bash_profile, .bash_login, .bash_logout, .profile, .zshrc, .zshenv, .zprofile, .zlogin, .cshrc, .tcshrc, .login, .kshrc, .inputrc]
+    expect: ["mode bits_none 0002"]
+    remediation: Remove write access for others from shell startup files and review them for injected commands.
+    fix: "chmod o-w {path}"
+    tests:
+      pass: {files: {/home/alice/.bashrc: "alias ll='ls -l'\n"}, meta: {/home/alice/.bashrc: "0644 1000 1000"}}
+      fail: {files: {/root/.profile: "PATH=/usr/bin\n"}, meta: {/root/.profile: "0666 0 0"}}
+
+  - id: fs:rhosts-files
+    title: .rhosts or .shosts file present
+    description: .rhosts/.shosts grant password-less trust to remote hosts for rsh and host-based SSH; they should not exist on modern systems.
+    severity: low
+    tags: [cis]
+    probe: {type: walk, roots: [/root, /home], max_depth: 2, file_type: file, match: [.rhosts, .shosts]}
+    expect_none: true
+    evidence: "{path} exists"
+    remediation: Delete the trust file; use SSH keys instead.
+    fix: "rm -f {path}"
+    tests:
+      pass: {files: {/home/alice/.bashrc: ""}}
+      fail: {files: {/home/alice/.rhosts: "+ +\n"}}
+
+  - id: fs:hosts-equiv
+    title: /etc/hosts.equiv or /etc/ssh/shosts.equiv present
+    description: System-wide host trust files let users from listed hosts log in without a password via rsh or host-based SSH.
+    severity: low
+    tags: [cis]
+    probe: {type: file, path: [/etc/hosts.equiv, /etc/ssh/shosts.equiv]}
+    expect_none: true
+    evidence: "{path} exists"
+    remediation: Remove host-based trust files unless host-based authentication is a deliberate design.
+    fix: "rm -f {path}"
+    tests:
+      pass: {files: {/etc/hosts: "127.0.0.1 localhost\n"}}
+      fail: {files: {/etc/hosts.equiv: "+\n"}}
+
+  - id: fs:core-dump-limit
+    title: Core dumps are not limited for all users
+    description: Core dumps of privileged processes can contain passwords, keys and session tokens. A '* hard core 0' limit stops them from being written.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: content, path: [/etc/security/limits.conf, /etc/security/limits.d/*.conf], regex: '^\s*\*\s+hard\s+core\s+0\b', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    missing_evidence: no /etc/security/limits.conf or limits.d file found
+    remediation: Add a hard core-size limit of 0 for all users (and set fs.suid_dumpable = 0).
+    fix: "echo '* hard core 0' > /etc/security/limits.d/60-lync-core.conf"
+    tests:
+      pass: {files: {/etc/security/limits.d/core.conf: "* hard core 0\n"}}
+      fail: {files: {/etc/security/limits.conf: "# * soft core 0\n"}}
+
+  - id: fs:coredump-storage
+    title: systemd-coredump stores core dumps on disk
+    description: systemd-coredump keeps core dumps (process memory, possibly secrets) under /var/lib/systemd/coredump by default (Storage=external).
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {file: [/usr/lib/systemd/systemd-coredump, /lib/systemd/systemd-coredump]}
+    probe: {type: config, format: kv, path: [/etc/systemd/coredump.conf, /etc/systemd/coredump.conf.d/*.conf], key: storage, default: external}
+    expect: ["value eq none"]
+    missing: fail
+    missing_evidence: /etc/systemd/coredump.conf not present (default Storage=external)
+    remediation: Set Storage=none (and ProcessSizeMax=0) in coredump.conf.
+    fix: "mkdir -p /etc/systemd/coredump.conf.d && printf '[Coredump]\\nStorage=none\\nProcessSizeMax=0\\n' > /etc/systemd/coredump.conf.d/60-lync.conf"
+    tests:
+      pass: {files: {/usr/lib/systemd/systemd-coredump: "", /etc/systemd/coredump.conf: "[Coredump]\nStorage=none\n"}}
+      fail: {files: {/usr/lib/systemd/systemd-coredump: "", /etc/systemd/coredump.conf: "[Coredump]\n#Storage=external\n"}}
+      na: {files: {/etc/systemd/coredump.conf: "[Coredump]\n"}}

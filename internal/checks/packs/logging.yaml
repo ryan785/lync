@@ -1,0 +1,183 @@
+pack: logging
+title: System logging (journald, rsyslog, /var/log)
+description: Whether logs survive a reboot, are shipped off the host, and can't be read or rewritten by unprivileged users.
+category: config
+references:
+  - https://www.freedesktop.org/software/systemd/man/latest/journald.conf.html
+  - https://www.rsyslog.com/doc/configuration/index.html
+  - https://www.cisecurity.org/cis-benchmarks
+checks:
+  - id: log:journald-volatile
+    title: journald keeps logs only in memory (or not at all)
+    description: Storage=volatile or none loses the journal on reboot; without rsyslog/syslog-ng nothing else keeps a copy, so a crash or an attacker-triggered reboot erases the evidence.
+    severity: low
+    applies_if: {file: [/etc/systemd/journald.conf, /etc/systemd/journald.conf.d/*.conf]}
+    probe: {type: config, format: kv, path: [/etc/systemd/journald.conf, /etc/systemd/journald.conf.d/*.conf], key: storage, default: auto}
+    expect: ["value not_in volatile,none"]
+    severity_if:
+      - {if: {not: {package: [rsyslog, syslog-ng, syslog-ng-core]}}, severity: medium}
+    remediation: Set Storage=persistent (or auto with /var/log/journal present), or forward to a persistent syslog daemon.
+    fix: "mkdir -p /etc/systemd/journald.conf.d && printf '[Journal]\\nStorage=persistent\\n' > /etc/systemd/journald.conf.d/60-lync.conf && systemctl restart systemd-journald"
+    tests:
+      pass: {files: {/etc/systemd/journald.conf: "[Journal]\n#Storage=auto\n"}}
+      fail:
+        - {files: {/etc/systemd/journald.conf: "[Journal]\nStorage=volatile\n"}, packages: {rsyslog: "8.2102-1"}, severity: low}
+        - {files: {/etc/systemd/journald.conf: "[Journal]\n", /etc/systemd/journald.conf.d/x.conf: "[Journal]\nStorage=none\n"}, packages: {bash: "5"}, severity: medium}
+      na: {files: {}}
+
+  - id: log:journald-not-persistent
+    title: journal is not persistent and no syslog daemon is installed
+    description: With Storage=auto the journal is only kept on disk if /var/log/journal exists. Here it doesn't, and no rsyslog/syslog-ng is installed, so all logs vanish at reboot.
+    severity: low
+    applies_if:
+      all:
+        - {file: [/etc/systemd/journald.conf, /usr/lib/systemd/systemd-journald, /lib/systemd/systemd-journald]}
+        - {not: {file: /var/log/journal}}
+        - {not: {package: [rsyslog, syslog-ng, syslog-ng-core]}}
+    probe: {type: config, format: kv, path: [/etc/systemd/journald.conf, /etc/systemd/journald.conf.d/*.conf], key: storage, default: auto}
+    expect: ["value eq persistent"]
+    missing: fail
+    missing_evidence: journald.conf absent (default Storage=auto) and /var/log/journal does not exist
+    remediation: Create /var/log/journal (or set Storage=persistent) so logs survive reboots.
+    fix: "mkdir -p /var/log/journal && systemd-tmpfiles --create --prefix /var/log/journal && systemctl restart systemd-journald"
+    tests:
+      pass: {files: {/etc/systemd/journald.conf: "[Journal]\nStorage=persistent\n"}, packages: {bash: "5"}}
+      fail: {files: {/etc/systemd/journald.conf: "[Journal]\n"}, packages: {bash: "5"}}
+      na:
+        - {files: {/etc/systemd/journald.conf: "[Journal]\n", /var/log/journal/: ""}, packages: {bash: "5"}}
+        - {files: {/etc/systemd/journald.conf: "[Journal]\n"}, packages: {rsyslog: "8"}}
+
+  - id: log:journald-compress
+    title: journald compression disabled
+    description: Compress=no makes large journal entries fill the log partition much faster.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {file: [/etc/systemd/journald.conf, /etc/systemd/journald.conf.d/*.conf]}
+    probe: {type: config, format: kv, path: [/etc/systemd/journald.conf, /etc/systemd/journald.conf.d/*.conf], key: compress, default: "yes"}
+    expect: ["value not_in no,false,0,off"]
+    remediation: Enable journal compression.
+    fix: "sed -i 's/^Compress=.*/Compress=yes/' /etc/systemd/journald.conf"
+    tests:
+      pass: {files: {/etc/systemd/journald.conf: "[Journal]\n#Compress=yes\n"}}
+      fail: {files: {/etc/systemd/journald.conf: "[Journal]\nCompress=no\n"}}
+
+  - id: log:rsyslog-not-running
+    title: rsyslog is installed but not running
+    description: An installed but stopped rsyslog means /var/log/messages, secure/auth.log and any remote forwarding silently stopped.
+    severity: low
+    applies_if: {package: [rsyslog]}
+    probe: {type: systemd, name: rsyslog.service}
+    expect: ["ActiveState eq active"]
+    remediation: Start and enable rsyslog.
+    fix: systemctl enable --now rsyslog
+    tests:
+      pass: {packages: {rsyslog: "8"}, cmds: {"systemctl show rsyslog.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"}}
+      fail: {packages: {rsyslog: "8"}, cmds: {"systemctl show rsyslog.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=failed\nUnitFileState=enabled\n"}}
+      na: {packages: {bash: "5"}}
+
+  - id: log:rsyslog-filecreatemode
+    title: rsyslog creates log files readable by everyone
+    description: rsyslog's built-in default FileCreateMode is 0644, so new log files (which can contain usernames, tokens in URLs, mail headers) are world-readable unless 0640 or stricter is configured.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [rsyslog]}
+    probe:
+      type: content
+      path: [/etc/rsyslog.conf, /etc/rsyslog.d/*.conf]
+      regex: '^\s*\$FileCreateMode\s+0[0-6][0-4]0\b|[Ff]ile[Cc]reate[Mm]ode\s*=\s*"0[0-6][0-4]0"'
+      combine: true
+    expect: ["match eq true"]
+    remediation: Set $FileCreateMode 0640 in /etc/rsyslog.conf.
+    fix: "echo '$FileCreateMode 0640' > /etc/rsyslog.d/00-lync-filemode.conf && systemctl restart rsyslog"
+    tests:
+      pass: {packages: {rsyslog: "8"}, files: {/etc/rsyslog.conf: "$FileCreateMode 0640\n*.info /var/log/messages\n"}}
+      fail: {packages: {rsyslog: "8"}, files: {/etc/rsyslog.conf: "*.info /var/log/messages\n"}}
+
+  - id: log:no-remote
+    title: Logs are not forwarded to a remote host
+    description: Logs kept only on the host can be erased by anyone who gains root there; a remote copy preserves evidence.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [rsyslog]}
+    probe:
+      type: content
+      path: [/etc/rsyslog.conf, /etc/rsyslog.d/*.conf]
+      regex: '^[^#\n]*(\s@@?[A-Za-z0-9\[(]|"omfwd"|"omrelp")'
+      combine: true
+    expect: ["match eq true"]
+    remediation: Forward logs to a central log host (TCP/RELP, ideally with TLS).
+    fix: "echo '*.* @@loghost.example:514' > /etc/rsyslog.d/90-remote.conf && systemctl restart rsyslog"
+    tests:
+      pass: {packages: {rsyslog: "8"}, files: {/etc/rsyslog.d/remote.conf: "*.* action(type=\"omfwd\" target=\"logs.example\" port=\"514\" protocol=\"tcp\")\n"}}
+      fail: {packages: {rsyslog: "8"}, files: {/etc/rsyslog.conf: "# *.* @@remote-host:514\n*.info /var/log/messages\n"}}
+
+  - id: log:logrotate-missing
+    title: rsyslog files are never rotated (logrotate.conf missing)
+    description: Without logrotate, rsyslog's files grow until /var fills, which stops logging (and often the services writing there).
+    severity: low
+    applies_if: {package: [rsyslog]}
+    probe: {type: file, path: /etc/logrotate.conf}
+    expect: ["type eq file"]
+    missing: fail
+    missing_evidence: /etc/logrotate.conf not found
+    remediation: Install logrotate.
+    fix: "dnf install logrotate   # or apt-get install logrotate"
+    tests:
+      pass: {packages: {rsyslog: "8"}, files: {/etc/logrotate.conf: "weekly\n"}}
+      fail: {packages: {rsyslog: "8"}, files: {}}
+
+  - id: log:var-log-world-writable
+    title: World-writable file or directory under /var/log
+    description: Any user can forge or truncate entries in a world-writable log, or plant files that root's log tooling (logrotate scripts) will process.
+    severity: medium
+    probe: {type: walk, roots: /var/log, max_depth: 4}
+    where: ["type ne symlink"]
+    expect: ["mode bits_none 0002"]
+    remediation: Remove write access for others.
+    fix: "chmod o-w {path}"
+    tests:
+      pass: {files: {/var/log/messages: "x\n"}, meta: {/var/log/messages: "0600 0 0"}}
+      fail: {files: {/var/log/app.log: "x\n"}, meta: {/var/log/app.log: "0666 0 0"}}
+
+  - id: log:btmp-readable
+    title: Failed-login log (btmp) is readable by all users
+    description: btmp records failed logins, and users frequently type their password into the username prompt; a world-readable btmp leaks those.
+    severity: low
+    probe: {type: file, path: /var/log/btmp}
+    expect: ["mode bits_none 0004"]
+    remediation: Restrict btmp (RHEL root:utmp 0600, Debian root:utmp 0660).
+    fix: chmod o-rwx /var/log/btmp
+    tests:
+      pass: {files: {/var/log/btmp: ""}, meta: {/var/log/btmp: "0660 0 43"}}
+      fail: {files: {/var/log/btmp: ""}, meta: {/var/log/btmp: "0664 0 43"}}
+
+  - id: log:audit-log-perms
+    title: Audit logs are accessible to other users
+    description: /var/log/audit contains command lines, file paths and authentication events; it should be readable only by root (and optionally a log group).
+    severity: medium
+    tags: [cis]
+    probe: {type: file, path: [/var/log/audit, /var/log/audit/audit.log]}
+    expect: ["mode bits_none 0007"]
+    remediation: Restrict the audit log directory and files.
+    fix: "chmod o-rwx {path}"
+    tests:
+      pass: {files: {/var/log/audit/audit.log: "type=X\n"}, meta: {/var/log/audit: "d0700 0 0", /var/log/audit/audit.log: "0600 0 0"}}
+      fail: {files: {/var/log/audit/audit.log: "type=X\n"}, meta: {/var/log/audit: "d0755 0 0", /var/log/audit/audit.log: "0644 0 0"}, findings: 2}
+
+  - id: log:file-world-readable
+    title: Log file readable by all users
+    description: Logs often contain usernames, IPs, URLs with tokens and application errors; CIS expects 0640 or stricter. Login accounting files (wtmp, lastlog) are excluded.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: walk, roots: /var/log, max_depth: 4, file_type: file}
+    where: ["name not_regex ^(wtmp|lastlog|README)"]
+    expect: ["mode bits_none 0004"]
+    remediation: Remove read access for others (and fix the creating service's mode, e.g. rsyslog FileCreateMode).
+    fix: "chmod o-r {path}"
+    tests:
+      pass: {files: {/var/log/wtmp: "", /var/log/syslog: "x\n"}, meta: {/var/log/wtmp: "0664 0 43", /var/log/syslog: "0640 0 4"}}
+      fail: {files: {/var/log/syslog: "x\n"}, meta: {/var/log/syslog: "0644 0 0"}}

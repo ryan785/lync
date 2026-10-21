@@ -1,0 +1,111 @@
+pack: time
+title: Time synchronisation (chrony, ntpd, systemd-timesyncd)
+description: Accurate clocks keep log timelines, TLS validation, Kerberos and TOTP working. Checks that a sync daemon runs, that it drops root, and that it doesn't answer management queries from the network.
+category: config
+references:
+  - https://chrony-project.org/doc/4.5/chrony.conf.html
+  - https://www.cisecurity.org/cis-benchmarks
+test_base:
+  files:
+    /etc/passwd: "root:x:0:0:root:/root:/bin/bash\nchrony:x:998:996::/var/lib/chrony:/sbin/nologin\nntp:x:38:38::/etc/ntp:/sbin/nologin\n"
+  cmds:
+    "systemctl show chronyd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\nActiveState=inactive\n"
+    "systemctl show chrony.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\nActiveState=inactive\n"
+    "systemctl show ntpd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\nActiveState=inactive\n"
+    "systemctl show ntp.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\nActiveState=inactive\n"
+    "systemctl show ntpsec.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\nActiveState=inactive\n"
+    "systemctl show systemd-timesyncd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\nActiveState=inactive\n"
+    "systemctl show openntpd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\nActiveState=inactive\n"
+checks:
+  - id: time:no-sync
+    title: No time synchronisation service is running
+    description: None of chronyd, ntpd, ntpsec, openntpd or systemd-timesyncd is active, so the clock drifts; log correlation, certificate validation and Kerberos/TOTP break over time.
+    severity: medium
+    tags: [cis]
+    applies_if: {binary: systemctl}
+    probe:
+      type: systemd
+      name: [chronyd.service, chrony.service, ntpd.service, ntp.service, ntpsec.service, systemd-timesyncd.service, openntpd.service]
+    where: ["ActiveState eq active"]
+    expect: ["ActiveState eq active"]
+    missing: fail
+    missing_evidence: no active chronyd/chrony/ntpd/ntp/ntpsec/openntpd/systemd-timesyncd unit
+    remediation: Enable one time-sync daemon (chrony on RHEL, chrony or systemd-timesyncd on Debian/Ubuntu).
+    fix: "dnf install chrony && systemctl enable --now chronyd   # Debian/Ubuntu: systemctl enable --now systemd-timesyncd"
+    tests:
+      pass: {files: {/usr/bin/systemctl: ""}, cmds: {"systemctl show chronyd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"}}
+      fail: {files: {/usr/bin/systemctl: ""}, cmds: {"systemctl show systemd-timesyncd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n"}}
+      na: {files: {}}
+
+  - id: time:chronyd-root
+    title: chronyd runs as root
+    description: chronyd parses packets from the network; it should drop privileges to the chrony/_chrony user after start-up (the -u option or the build default).
+    severity: low
+    tags: [cis]
+    probe: {type: process, name: chronyd}
+    expect: ["uid ne 0"]
+    remediation: Run chronyd as its unprivileged user (OPTIONS="-u chrony" in /etc/sysconfig/chronyd, DAEMON_OPTS="-u _chrony" in /etc/default/chrony).
+    fix: "echo 'OPTIONS=\"-u chrony\"' > /etc/sysconfig/chronyd && systemctl restart chronyd"
+    tests:
+      pass: {files: {/proc/412/comm: "chronyd\n", /proc/412/status: "Name:\tchronyd\nUid:\t998\t998\t998\t998\n"}}
+      fail: {files: {/proc/412/comm: "chronyd\n", /proc/412/status: "Name:\tchronyd\nUid:\t0\t0\t0\t0\n"}}
+
+  - id: time:ntpd-root
+    title: ntpd runs as root
+    description: ntpd should run with '-u ntp:ntp' so a parsing bug in network packet handling doesn't give root.
+    severity: low
+    tags: [cis]
+    probe: {type: process, name: [ntpd, ntpsec]}
+    expect: ["uid ne 0"]
+    remediation: Start ntpd with -u ntp:ntp (OPTIONS in /etc/sysconfig/ntpd or /etc/default/ntp).
+    fix: "echo 'OPTIONS=\"-u ntp:ntp -g\"' > /etc/sysconfig/ntpd && systemctl restart ntpd"
+    tests:
+      pass: {files: {/proc/77/comm: "ntpd\n", /proc/77/status: "Uid:\t38\t38\t38\t38\n"}}
+      fail: {files: {/proc/77/comm: "ntpd\n", /proc/77/status: "Uid:\t0\t0\t0\t0\n"}}
+
+  - id: time:chrony-no-sources
+    title: chrony has no time sources configured
+    description: Without server/pool/refclock lines chronyd runs but never synchronises.
+    severity: low
+    applies_if: {package: [chrony]}
+    probe:
+      type: content
+      path: [/etc/chrony.conf, /etc/chrony/chrony.conf, /etc/chrony/conf.d/*.conf, /etc/chrony/sources.d/*.sources]
+      regex: '^\s*(server|pool|peer|sourcedir|refclock)\s+\S+'
+      combine: true
+    expect: ["match eq true"]
+    remediation: Add at least one server or pool line.
+    fix: "echo 'pool 2.pool.ntp.org iburst' >> /etc/chrony.conf && systemctl restart chronyd"
+    tests:
+      pass: {packages: {chrony: "4.5"}, files: {/etc/chrony/chrony.conf: "sourcedir /run/chrony-dhcp\npool 2.debian.pool.ntp.org iburst\n"}}
+      fail: {packages: {chrony: "4.5"}, files: {/etc/chrony.conf: "# pool 2.pool.ntp.org iburst\ndriftfile /var/lib/chrony/drift\n"}}
+      na: {packages: {ntp: "4.2"}}
+
+  - id: time:chrony-cmdport-exposed
+    title: chronyc command port (323/udp) listens on the network
+    description: chronyd's command port should only listen on localhost; remote chronyc access exposes monitoring data and, with cmdallow, management commands.
+    severity: low
+    applies_if: {package: [chrony]}
+    probe: {type: listener, ports: 323, proto: udp}
+    expect: ["loopback eq true"]
+    remediation: Bind the command port to localhost (bindcmdaddress 127.0.0.1 / ::1) or disable it with cmdport 0.
+    fix: "printf 'bindcmdaddress 127.0.0.1\\nbindcmdaddress ::1\\n' >> /etc/chrony.conf && systemctl restart chronyd"
+    tests:
+      pass: {packages: {chrony: "4.5"}, cmds: {"ss -H -tulnp": "udp UNCONN 0 0 127.0.0.1:323 0.0.0.0:* users:((\"chronyd\",pid=412,fd=5))\n"}}
+      fail: {packages: {chrony: "4.5"}, cmds: {"ss -H -tulnp": "udp UNCONN 0 0 0.0.0.0:323 0.0.0.0:* users:((\"chronyd\",pid=412,fd=5))\n"}}
+
+  - id: time:ntp-restrict-default
+    title: ntpd answers status queries from any host (no 'restrict default ... noquery')
+    description: Without noquery in the default restriction, ntpd answers mode 6/7 queries (ntpq/ntpdc) from anywhere, leaking information and enabling reflection/amplification (monlist on old builds).
+    severity: medium
+    tags: [cis]
+    applies_if: {package: [ntp, ntpsec]}
+    probe: {type: content, path: [/etc/ntp.conf, /etc/ntpsec/ntp.conf], regex: '^\s*restrict\s+(-4\s+)?default\s+.*\bnoquery\b', combine: true}
+    expect: ["match eq true"]
+    remediation: Restrict the default access class.
+    fix: "echo 'restrict default kod nomodify notrap nopeer noquery limited' >> /etc/ntp.conf && systemctl restart ntpd"
+    references: [https://www.cisa.gov/news-events/alerts/2014/01/13/ntp-amplification-attacks-using-cve-2013-5211]
+    tests:
+      pass: {packages: {ntp: "4.2.8"}, files: {/etc/ntp.conf: "restrict default kod nomodify notrap nopeer noquery\nserver 0.pool.ntp.org\n"}}
+      fail: {packages: {ntp: "4.2.8"}, files: {/etc/ntp.conf: "restrict default nomodify notrap\nserver 0.pool.ntp.org\n"}}
+      na: {packages: {chrony: "4.5"}}

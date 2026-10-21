@@ -1,0 +1,167 @@
+pack: pam
+title: PAM authentication stack
+description: Account lockout, password history, empty-password acceptance, su restrictions and backdoor-style entries in /etc/pam.d. Password complexity in pwquality.conf is covered by login-defs:pw-*.
+category: config
+applies_if: {file: /etc/pam.d}
+references:
+  - https://man7.org/linux/man-pages/man8/pam_faillock.8.html
+  - https://www.cisecurity.org/cis-benchmarks
+test_base:
+  files:
+    /etc/pam.d/: ""
+checks:
+  - id: pam:permit-auth
+    title: PAM auth stack accepts any password (pam_permit is sufficient)
+    description: "'auth sufficient pam_permit.so' authenticates everyone without checking a password: a classic backdoor or a debugging leftover."
+    severity: critical
+    level: basic
+    probe: {type: content, path: /etc/pam.d/*, regex: '^\s*auth\s+(sufficient|\[success=done[^\]]*\])\s+pam_permit\.so'}
+    expect: ["match eq false"]
+    remediation: Remove the line, then investigate how it got there (check package integrity with rpm -V pam / debsums and review recent logins).
+    fix: "grep -n pam_permit {path}"
+    tests:
+      pass: {files: {/etc/pam.d/common-auth: "auth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\nauth required pam_permit.so\n"}}
+      fail: {files: {/etc/pam.d/sshd: "auth sufficient pam_permit.so\nauth include password-auth\n"}}
+      na: {files: {/etc/pam.d/: "!absent"}}
+
+  - id: pam:rhosts
+    title: pam_rhosts trusts .rhosts host equivalence
+    description: pam_rhosts authenticates users based on .rhosts/hosts.equiv entries without a password.
+    severity: high
+    probe: {type: content, path: /etc/pam.d/*, regex: '^\s*auth\s+\S+\s+pam_rhosts(_auth)?\.so'}
+    expect: ["match eq false"]
+    remediation: Remove pam_rhosts from the PAM configuration.
+    fix: "sed -i '/pam_rhosts/d' {path}"
+    tests:
+      pass: {files: {/etc/pam.d/rlogin: "auth required pam_unix.so\n"}}
+      fail: {files: {/etc/pam.d/rlogin: "auth sufficient pam_rhosts.so\n"}}
+
+  - id: pam:nullok
+    title: pam_unix accepts empty passwords (nullok)
+    description: With nullok, an account whose password is empty can log in without one. RHEL and Debian ship nullok by default; account:empty-pwd flags the accounts that are actually exposed.
+    severity: low
+    tags: [cis]
+    probe: {type: content, path: [/etc/pam.d/system-auth, /etc/pam.d/password-auth, /etc/pam.d/common-auth], regex: '^\s*auth\s+.*pam_unix\.so.*\bnullok\b'}
+    expect: ["match eq false"]
+    remediation: Remove nullok from the pam_unix auth lines (authselect-based systems use 'authselect enable-feature without-nullok').
+    fix: "authselect enable-feature without-nullok   # Debian/Ubuntu: edit {path} and drop nullok"
+    tests:
+      pass: {files: {/etc/pam.d/system-auth: "auth sufficient pam_unix.so try_first_pass\n"}}
+      fail: {files: {/etc/pam.d/common-auth: "auth [success=1 default=ignore] pam_unix.so nullok\n"}}
+
+  - id: pam:no-lockout
+    title: No failed-login lockout (pam_faillock/pam_tally2) in the auth stack
+    description: Without an account lockout module, password guessing against local and SSH logins is limited only by sshd's MaxAuthTries per connection.
+    severity: medium
+    tags: [cis]
+    probe: {type: content, path: [/etc/pam.d/system-auth, /etc/pam.d/password-auth, /etc/pam.d/common-auth], regex: 'pam_(faillock|tally2)\.so', combine: true}
+    expect: ["match eq true"]
+    remediation: Enable pam_faillock (RHEL 8+ 'authselect enable-feature with-faillock'; Debian/Ubuntu add pam_faillock to common-auth and common-account).
+    fix: authselect enable-feature with-faillock
+    references: [https://access.redhat.com/solutions/62949]
+    tests:
+      pass: {files: {/etc/pam.d/system-auth: "auth required pam_faillock.so preauth silent\nauth sufficient pam_unix.so\n"}}
+      fail: {files: {/etc/pam.d/common-auth: "auth [success=1 default=ignore] pam_unix.so\n"}}
+
+  - id: pam:faillock-deny
+    title: faillock allows too many failed attempts (or none)
+    description: pam_faillock's deny should be between 1 and 5; deny=0 disables the lockout.
+    severity: low
+    tags: [cis]
+    applies_if: {file: /etc/security/faillock.conf}
+    probe: {type: config, format: ini, path: /etc/security/faillock.conf, key: deny, default: "3"}
+    expect: ["value ge 1", "value le 5"]
+    remediation: Set deny between 1 and 5 in /etc/security/faillock.conf.
+    fix: "sed -i 's/^#\\?\\s*deny\\s*=.*/deny = 5/' /etc/security/faillock.conf"
+    tests:
+      pass: [{files: {/etc/security/faillock.conf: "# deny = 3\n"}}, {files: {/etc/security/faillock.conf: "deny = 5\n"}}]
+      fail: {files: {/etc/security/faillock.conf: "deny = 0\n"}}
+      na: {files: {}}
+
+  - id: pam:faillock-unlock-time
+    title: faillock unlocks accounts too quickly
+    description: unlock_time below 600 seconds (and not 0 = manual unlock) lets an attacker resume guessing after a short pause.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {file: /etc/security/faillock.conf}
+    probe: {type: config, format: ini, path: /etc/security/faillock.conf, key: unlock_time, default: "600"}
+    expect: ["value eq 0 || value ge 600"]
+    remediation: Set unlock_time to 900 (or 0 for manual unlock).
+    fix: "echo 'unlock_time = 900' >> /etc/security/faillock.conf"
+    tests:
+      pass: {files: {/etc/security/faillock.conf: "unlock_time = 900\n"}}
+      fail: {files: {/etc/security/faillock.conf: "unlock_time = 60\n"}}
+
+  - id: pam:pwhistory
+    title: Password reuse is not restricted
+    description: Without pam_pwhistory (or pam_unix remember=) users can rotate back to a previous, possibly leaked password.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe:
+      type: content
+      path: [/etc/pam.d/system-auth, /etc/pam.d/common-password, /etc/security/pwhistory.conf]
+      regex: '(^|\s)remember\s*=\s*([5-9]|[1-9][0-9]+)\b'
+      combine: true
+    expect: ["match eq true"]
+    remediation: Remember at least 5 previous passwords (pam_pwhistory remember=5 or /etc/security/pwhistory.conf).
+    fix: "echo 'remember = 24' >> /etc/security/pwhistory.conf"
+    tests:
+      pass: {files: {/etc/security/pwhistory.conf: "remember = 24\n"}}
+      fail: {files: {/etc/pam.d/common-password: "password requisite pam_pwhistory.so remember=2\n"}}
+
+  - id: pam:weak-hash
+    title: pam_unix hashes new passwords with a weak algorithm
+    description: md5, bigcrypt or descrypt on the pam_unix password line means new passwords get crackable hashes regardless of login.defs.
+    severity: medium
+    probe: {type: content, path: [/etc/pam.d/system-auth, /etc/pam.d/password-auth, /etc/pam.d/common-password], regex: '^\s*password\s+.*pam_unix\.so.*\b(md5|bigcrypt|descrypt)\b'}
+    expect: ["match eq false"]
+    remediation: Use sha512 or yescrypt on the pam_unix password line.
+    fix: "sed -i 's/\\bmd5\\b/sha512/' {path}"
+    tests:
+      pass: {files: {/etc/pam.d/common-password: "password [success=1 default=ignore] pam_unix.so obscure yescrypt\n"}}
+      fail: {files: {/etc/pam.d/system-auth: "password sufficient pam_unix.so md5 shadow\n"}}
+
+  - id: pam:no-pwquality
+    title: No password-quality module in the password stack
+    description: Without pam_pwquality (or pam_cracklib/pam_passwdqc) the pwquality.conf settings are never applied when users change passwords.
+    severity: low
+    tags: [cis]
+    probe: {type: content, path: [/etc/pam.d/system-auth, /etc/pam.d/common-password], regex: '^\s*password\s+\S+\s+pam_(pwquality|cracklib|passwdqc)\.so', combine: true}
+    expect: ["match eq true"]
+    remediation: Add pam_pwquality to the password stack (Debian/Ubuntu install libpam-pwquality; RHEL includes it in authselect profiles).
+    fix: "apt-get install libpam-pwquality (Debian/Ubuntu); RHEL: authselect select sssd"
+    tests:
+      pass: {files: {/etc/pam.d/system-auth: "password requisite pam_pwquality.so local_users_only\n"}}
+      fail: {files: {/etc/pam.d/common-password: "password [success=1 default=ignore] pam_unix.so obscure yescrypt\n"}}
+
+  - id: pam:minclass
+    title: Password complexity does not require several character classes
+    description: pwquality minclass below 3 accepts passwords drawn from one or two character classes.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {file: /etc/security/pwquality.conf}
+    probe: {type: config, format: ini, path: [/etc/security/pwquality.conf, /etc/security/pwquality.conf.d/*.conf], key: minclass, default: "0"}
+    expect: ["value ge 3"]
+    remediation: Require at least three character classes (or rely on a long minlen).
+    fix: "echo 'minclass = 3' > /etc/security/pwquality.conf.d/60-lync.conf"
+    tests:
+      pass: {files: {/etc/security/pwquality.conf: "minclass = 4\n"}}
+      fail: {files: {/etc/security/pwquality.conf: "minlen = 14\n"}}
+
+  - id: pam:su-wheel
+    title: su is not restricted to the wheel/sudo group
+    description: Without pam_wheel any user who learns the root password can become root with su.
+    severity: low
+    tags: [cis]
+    applies_if: {file: /etc/pam.d/su}
+    probe: {type: content, path: /etc/pam.d/su, regex: '^\s*auth\s+required\s+pam_wheel\.so'}
+    expect: ["match eq true"]
+    remediation: Uncomment or add 'auth required pam_wheel.so use_uid' in /etc/pam.d/su.
+    fix: "sed -i 's/^#\\s*\\(auth\\s\\+required\\s\\+pam_wheel.so\\)/\\1/' /etc/pam.d/su"
+    tests:
+      pass: {files: {/etc/pam.d/su: "auth sufficient pam_rootok.so\nauth required pam_wheel.so use_uid\n"}}
+      fail: {files: {/etc/pam.d/su: "auth sufficient pam_rootok.so\n# auth required pam_wheel.so\n"}}
+      na: {files: {/etc/pam.d/login: "auth include system-auth\n"}}

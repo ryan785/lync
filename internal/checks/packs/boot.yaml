@@ -1,0 +1,159 @@
+pack: boot
+title: Bootloader and kernel command line
+description: Who can modify the boot configuration, whether GRUB is password-protected, and kernel command-line options that switch off security features (SELinux/AppArmor, CPU vulnerability mitigations) or replace init.
+category: hardening
+references:
+  - https://www.gnu.org/software/grub/manual/grub/html_node/Security.html
+  - https://docs.kernel.org/admin-guide/kernel-parameters.html
+  - https://www.cisecurity.org/cis-benchmarks
+checks:
+  - id: boot:grub-cfg-writable
+    title: GRUB configuration is writable by non-root users
+    description: Whoever can edit grub.cfg controls the kernel and its command line at the next boot (e.g. init=/bin/sh, selinux=0).
+    severity: critical
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: [/boot/grub2/grub.cfg, /boot/grub/grub.cfg, /boot/efi/EFI/*/grub.cfg, /boot/grub2/grubenv]}
+    where: ["type eq file"]
+    expect: ["uid eq 0", "mode bits_none 0022"]
+    remediation: Restore root ownership and remove group/other write access.
+    fix: "chown root:root {path} && chmod 600 {path}"
+    tests:
+      pass: {files: {/boot/grub2/grub.cfg: "set default=0\n"}, meta: {/boot/grub2/grub.cfg: "0600 0 0"}}
+      fail: {files: {/boot/grub/grub.cfg: "set default=0\n"}, meta: {/boot/grub/grub.cfg: "0666 0 0"}}
+
+  - id: boot:grub-cfg-readable
+    title: GRUB configuration is readable by all users
+    description: CIS expects grub.cfg to be root-only (0600 or 0400) because it can contain the bootloader password hash and kernel parameters. Debian/Ubuntu generate it 0444.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: file, path: [/boot/grub2/grub.cfg, /boot/grub/grub.cfg]}
+    where: ["type eq file"]
+    expect: ["mode perm_max 0600"]
+    remediation: Restrict grub.cfg to root.
+    fix: "chmod 600 {path}"
+    tests:
+      pass: {files: {/boot/grub2/grub.cfg: ""}, meta: {/boot/grub2/grub.cfg: "0600 0 0"}}
+      fail: {files: {/boot/grub/grub.cfg: ""}, meta: {/boot/grub/grub.cfg: "0444 0 0"}}
+
+  - id: boot:grub-user-cfg-perms
+    title: GRUB password file (user.cfg) is readable by other users
+    description: /boot/grub2/user.cfg holds the GRUB2_PASSWORD PBKDF2 hash; anyone who can read it can attack the bootloader password offline.
+    severity: medium
+    tags: [cis]
+    probe: {type: file, path: [/boot/grub2/user.cfg, /boot/efi/EFI/*/user.cfg]}
+    expect: ["uid eq 0", "mode perm_max 0600"]
+    remediation: Restrict user.cfg to root.
+    fix: "chown root:root {path} && chmod 600 {path}"
+    tests:
+      pass: {files: {/boot/grub2/user.cfg: "GRUB2_PASSWORD=grub.pbkdf2.sha512.10000.lync-test-secret\n"}, meta: {/boot/grub2/user.cfg: "0600 0 0"}}
+      fail: {files: {/boot/grub2/user.cfg: "GRUB2_PASSWORD=grub.pbkdf2.sha512.10000.lync-test-secret\n"}, meta: {/boot/grub2/user.cfg: "0644 0 0"}}
+
+  - id: boot:grub-no-password
+    title: GRUB has no bootloader password
+    description: Without a GRUB password anyone at the console (or with VM console access) can edit the kernel command line and boot into a root shell.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {file: [/boot/grub2/grub.cfg, /boot/grub/grub.cfg]}
+    probe:
+      type: content
+      path: [/boot/grub2/grub.cfg, /boot/grub/grub.cfg, /boot/grub2/user.cfg]
+      regex: '^\s*(password_pbkdf2|password)\s+\S+\s+[^$\s]|^\s*GRUB2_PASSWORD=\S'
+      combine: true
+      secret: true
+    expect: ["match eq true"]
+    remediation: Set a GRUB superuser password (RHEL grub2-setpassword; Debian add password_pbkdf2 to /etc/grub.d/40_custom and run update-grub).
+    fix: grub2-setpassword
+    tests:
+      pass: {files: {/boot/grub2/grub.cfg: "set default=0\n", /boot/grub2/user.cfg: "GRUB2_PASSWORD=grub.pbkdf2.sha512.10000.lync-test-secret\n"}}
+      fail:
+        - {files: {/boot/grub/grub.cfg: "set default=0\nmenuentry 'Debian' {\n}\n"}}
+        - {name: rhel template without user.cfg, files: {/boot/grub2/grub.cfg: "if [ -n \"${GRUB2_PASSWORD}\" ]; then\n  password_pbkdf2 root ${GRUB2_PASSWORD}\nfi\n"}}
+      na: {files: {}}
+
+  - id: boot:selinux-disabled-cmdline
+    title: SELinux disabled or permissive on the kernel command line
+    description: selinux=0 or enforcing=0 on the running kernel's command line overrides /etc/selinux/config and removes mandatory access control.
+    severity: high
+    probe: {type: content, path: /proc/cmdline, regex: '(^|\s)(selinux=0|enforcing=0)(\s|$)'}
+    expect: ["match eq false"]
+    evidence: "{path}: {line}"
+    remediation: Remove selinux=0 / enforcing=0 from the boot entries and reboot (relabel first if SELinux was off).
+    fix: "grubby --update-kernel ALL --remove-args 'selinux enforcing' && touch /.autorelabel"
+    tests:
+      pass: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/mapper/rl-root ro crashkernel=auto\n"}}
+      fail: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro selinux=0\n"}}
+
+  - id: boot:apparmor-disabled-cmdline
+    title: AppArmor disabled on the kernel command line
+    description: apparmor=0 (or security= selecting no LSM) on the command line turns AppArmor off regardless of installed profiles.
+    severity: high
+    probe: {type: content, path: /proc/cmdline, regex: '(^|\s)apparmor=0(\s|$)'}
+    expect: ["match eq false"]
+    evidence: "{path}: {line}"
+    remediation: Remove apparmor=0 from GRUB_CMDLINE_LINUX in /etc/default/grub, run update-grub and reboot.
+    fix: "sed -i 's/ apparmor=0//' /etc/default/grub && update-grub"
+    tests:
+      pass: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro quiet\n"}}
+      fail: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro apparmor=0\n"}}
+
+  - id: boot:init-override
+    title: Kernel booted with init= pointing at a shell
+    description: init=/bin/sh (or bash) bypasses systemd, authentication and every service; on a running server it indicates a recovery session left in place or tampering.
+    severity: high
+    probe: {type: content, path: /proc/cmdline, regex: '(^|\s)init=\S*/(ba|da|z|k)?sh(\s|$)'}
+    expect: ["match eq false"]
+    evidence: "{path}: {line}"
+    remediation: Remove init= from the boot entry and investigate why it was set.
+    fix: "grubby --update-kernel ALL --remove-args init"
+    tests:
+      pass: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro init=/lib/systemd/systemd\n"}}
+      fail: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 rw init=/bin/bash\n"}}
+
+  - id: boot:mitigations-off
+    title: CPU vulnerability mitigations disabled on the kernel command line
+    description: mitigations=off (or nopti, nospectre_v2, spectre_v2=off, mds=off...) disables protections against Spectre/Meltdown-class side channels that let local or co-tenant code read kernel and other processes' memory.
+    severity: medium
+    probe:
+      type: content
+      path: /proc/cmdline
+      regex: '(^|\s)(mitigations=off|nopti|pti=off|nospectre_v1|nospectre_v2|spectre_v2=off|spec_store_bypass_disable=off|mds=off|tsx_async_abort=off|l1tf=off|retbleed=off|srbds=off|mmio_stale_data=off|gather_data_sampling=off)(\s|$)'
+    expect: ["match eq false"]
+    evidence: "{path}: {line}"
+    remediation: Remove the mitigation-disabling options from the boot entry and reboot.
+    fix: "grubby --update-kernel ALL --remove-args mitigations   # or edit GRUB_CMDLINE_LINUX and update-grub"
+    references: [https://docs.kernel.org/admin-guide/hw-vuln/index.html]
+    tests:
+      pass: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro quiet splash\n"}}
+      fail: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro mitigations=off\n"}}
+
+  - id: boot:boot-writable
+    title: /boot is writable by non-root users
+    description: Anyone who can write /boot can replace the kernel or initramfs that runs at the next boot.
+    severity: critical
+    level: basic
+    probe: {type: file, path: [/boot, /boot/efi]}
+    where: ["type eq dir"]
+    expect: ["uid eq 0", "mode bits_none 0022"]
+    remediation: Restore root ownership and remove group/other write access.
+    fix: "chown root:root {path} && chmod 755 {path}"
+    tests:
+      pass: {meta: {/boot: "d0755 0 0"}}
+      fail: {meta: {/boot: "d0777 0 0"}}
+
+  - id: boot:secure-boot-disabled
+    title: UEFI Secure Boot is disabled
+    description: Without Secure Boot, a bootkit or modified kernel/initramfs can be installed by anyone with root once and survives reinstalling userland.
+    severity: info
+    level: strict
+    applies_if: {binary: mokutil}
+    probe: {type: command, cmd: [mokutil, --sb-state]}
+    expect: ['output regex (?i)SecureBoot enabled']
+    remediation: Enable Secure Boot in the firmware (on hardware or hypervisors that support it).
+    fix: "mokutil --sb-state   # enable in firmware setup"
+    tests:
+      pass: {files: {/usr/bin/mokutil: ""}, cmds: {"mokutil --sb-state": "SecureBoot enabled\n"}}
+      fail: {files: {/usr/bin/mokutil: ""}, cmds: {"mokutil --sb-state": "SecureBoot disabled\n"}}
+      skip: {files: {/usr/bin/mokutil: ""}}

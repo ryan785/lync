@@ -1,0 +1,333 @@
+pack: audit
+title: Linux audit framework (auditd)
+description: Whether auditd is installed and running, how it behaves when its disk fills, and whether the rule set records the events incident responders need (identity files, sudoers, kernel modules, time changes, logins, permission changes, deletions).
+category: config
+references:
+  - https://man7.org/linux/man-pages/man5/auditd.conf.5.html
+  - https://man7.org/linux/man-pages/man7/audit.rules.7.html
+  - https://www.cisecurity.org/cis-benchmarks
+test_base:
+  packages: {audit: "3.1.2-1"}
+checks:
+  - id: audit:installed
+    title: auditd is not installed
+    description: Without the audit daemon there is no tamper-resistant record of privileged actions (file changes, module loads, identity changes) for incident response.
+    severity: low
+    tags: [cis]
+    probe: {type: package, name: [audit, auditd]}
+    expect: ["name not_empty"]
+    missing: fail
+    missing_evidence: neither audit (RHEL/SUSE/Alpine) nor auditd (Debian/Ubuntu) is installed
+    remediation: Install and enable auditd.
+    fix: "dnf install audit && systemctl enable --now auditd   # Debian/Ubuntu: apt-get install auditd"
+    tests:
+      pass: {packages: {bash: "5.2-1"}}
+      fail: {packages: {audit: "!absent", bash: "5.2-1"}}
+
+  - id: audit:not-running
+    title: auditd is installed but not running
+    description: An installed but stopped auditd gives a false sense of coverage; no events are recorded.
+    severity: medium
+    applies_if: {package: [audit, auditd]}
+    probe: {type: systemd, name: auditd.service}
+    expect: ["ActiveState eq active"]
+    remediation: Start auditd (it refuses 'systemctl restart'; use 'service auditd restart' to reload).
+    fix: systemctl enable --now auditd
+    tests:
+      pass: {cmds: {"systemctl show auditd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"}}
+      fail: {cmds: {"systemctl show auditd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n"}}
+      na: {packages: {audit: "!absent", bash: "5.2-1"}}
+
+  - id: audit:not-enabled
+    title: auditd is not enabled at boot
+    description: If auditd is not enabled it stops recording after the next reboot.
+    severity: low
+    applies_if: {package: [audit, auditd]}
+    probe: {type: systemd, name: auditd.service}
+    expect: ["UnitFileState in enabled,static,enabled-runtime"]
+    remediation: Enable auditd at boot.
+    fix: systemctl enable auditd
+    tests:
+      pass: {cmds: {"systemctl show auditd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"}}
+      fail: {cmds: {"systemctl show auditd.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=disabled\n"}}
+
+  - id: audit:disk-full-action
+    title: auditd keeps running silently when its disk is full
+    description: disk_full_action IGNORE, SYSLOG or ROTATE lets an attacker fill the log partition and then act unrecorded.
+    severity: low
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: config, format: kv, path: /etc/audit/auditd.conf, key: disk_full_action, default: SUSPEND}
+    expect: ["value in suspend,single,halt"]
+    remediation: Set disk_full_action to SUSPEND, SINGLE or HALT according to your availability needs.
+    fix: "sed -i 's/^disk_full_action.*/disk_full_action = SINGLE/' /etc/audit/auditd.conf"
+    tests:
+      pass: {files: {/etc/audit/auditd.conf: "disk_full_action = SUSPEND\n"}}
+      fail: {files: {/etc/audit/auditd.conf: "disk_full_action = IGNORE\n"}}
+
+  - id: audit:disk-error-action
+    title: auditd ignores disk write errors
+    description: disk_error_action IGNORE or SYSLOG drops audit records on I/O errors without stopping.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: config, format: kv, path: /etc/audit/auditd.conf, key: disk_error_action, default: SUSPEND}
+    expect: ["value in suspend,single,halt"]
+    remediation: Set disk_error_action to SUSPEND, SINGLE or HALT.
+    fix: "sed -i 's/^disk_error_action.*/disk_error_action = SUSPEND/' /etc/audit/auditd.conf"
+    tests:
+      pass: {files: {/etc/audit/auditd.conf: "log_file = /var/log/audit/audit.log\n"}}
+      fail: {files: {/etc/audit/auditd.conf: "disk_error_action = SYSLOG\n"}}
+
+  - id: audit:max-log-file-action
+    title: auditd rotates away old audit logs
+    description: max_log_file_action ROTATE (the default) deletes the oldest audit logs once num_logs is reached; CIS expects keep_logs and external archiving.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: config, format: kv, path: /etc/audit/auditd.conf, key: max_log_file_action, default: ROTATE}
+    expect: ["value eq keep_logs"]
+    remediation: Set max_log_file_action = keep_logs and archive or ship audit logs off the host.
+    fix: "sed -i 's/^max_log_file_action.*/max_log_file_action = keep_logs/' /etc/audit/auditd.conf"
+    tests:
+      pass: {files: {/etc/audit/auditd.conf: "max_log_file_action = KEEP_LOGS\n"}}
+      fail: {files: {/etc/audit/auditd.conf: "max_log_file_action = ROTATE\n"}}
+
+  - id: audit:space-left-action
+    title: auditd does not alert when audit disk space runs low
+    description: space_left_action SYSLOG/IGNORE gives no actionable warning before the audit partition fills.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: config, format: kv, path: /etc/audit/auditd.conf, key: space_left_action, default: SYSLOG}
+    expect: ["value in email,exec,single,halt"]
+    remediation: Set space_left_action = email (with action_mail_acct) or exec an alerting script.
+    fix: "sed -i 's/^space_left_action.*/space_left_action = email/' /etc/audit/auditd.conf"
+    tests:
+      pass: {files: {/etc/audit/auditd.conf: "space_left_action = email\n"}}
+      fail: {files: {/etc/audit/auditd.conf: "space_left_action = SYSLOG\n"}}
+
+  - id: audit:admin-space-left-action
+    title: auditd keeps running when audit disk space is critically low
+    description: admin_space_left_action should switch to single-user or halt so the system never runs unaudited.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: config, format: kv, path: /etc/audit/auditd.conf, key: admin_space_left_action, default: SUSPEND}
+    expect: ["value in single,halt"]
+    remediation: Set admin_space_left_action = single (or halt).
+    fix: "sed -i 's/^admin_space_left_action.*/admin_space_left_action = single/' /etc/audit/auditd.conf"
+    tests:
+      pass: {files: {/etc/audit/auditd.conf: "admin_space_left_action = single\n"}}
+      fail: {files: {/etc/audit/auditd.conf: "admin_space_left_action = SUSPEND\n"}}
+
+  - id: audit:boot-param
+    title: Processes started before auditd are not audited (no audit=1)
+    description: Without audit=1 on the kernel command line, processes started before auditd have no audit context and are never audited.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: /proc/cmdline, regex: '(^|\s)audit=1(\s|$)'}
+    expect: ["match eq true"]
+    remediation: Add audit=1 to the kernel command line.
+    fix: "grubby --update-kernel ALL --args audit=1   # Debian/Ubuntu: add to GRUB_CMDLINE_LINUX and update-grub"
+    tests:
+      pass: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro audit=1\n"}}
+      fail: {files: {/proc/cmdline: "BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro quiet\n"}}
+
+  - id: audit:backlog-limit
+    title: Audit backlog limit is not raised at boot
+    description: The default backlog (64) overflows during boot and records are lost; CIS recommends audit_backlog_limit=8192 or more.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: /proc/cmdline, regex: 'audit_backlog_limit=([89][0-9]{3}|[1-9][0-9]{4,})\b'}
+    expect: ["match eq true"]
+    remediation: Add audit_backlog_limit=8192 to the kernel command line.
+    fix: "grubby --update-kernel ALL --args audit_backlog_limit=8192"
+    tests:
+      pass: {files: {/proc/cmdline: "ro audit=1 audit_backlog_limit=8192\n"}}
+      fail: {files: {/proc/cmdline: "ro audit=1\n"}}
+
+  # ---- rule coverage (rules.d and the compiled audit.rules) -----------------
+  - id: audit:rule-identity
+    title: Changes to account databases are not audited
+    description: No watch on /etc/passwd, /etc/shadow, /etc/group or /etc/gshadow, so account and password tampering leaves no audit trail.
+    severity: low
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '^\s*-w\s+/etc/(passwd|shadow|group|gshadow)\s+-p\s+[rx]*w', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    missing_evidence: no audit rules files found
+    remediation: Watch the identity files for writes and attribute changes.
+    fix: "printf -- '-w /etc/passwd -p wa -k identity\\n-w /etc/shadow -p wa -k identity\\n-w /etc/group -p wa -k identity\\n-w /etc/gshadow -p wa -k identity\\n-w /etc/security/opasswd -p wa -k identity\\n' > /etc/audit/rules.d/50-identity.rules && augenrules --load"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-identity.rules: "-w /etc/shadow -p wa -k identity\n"}}
+      fail:
+        - {files: {/etc/audit/rules.d/audit.rules: "-D\n-b 8192\n"}}
+        - {name: no rules at all, files: {}}
+
+  - id: audit:rule-sudoers
+    title: Changes to sudoers are not audited
+    description: No watch on /etc/sudoers or /etc/sudoers.d, so privilege grants can be added silently.
+    severity: low
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '^\s*-w\s+/etc/sudoers(\.d)?/?\s+-p\s+[rx]*w', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Watch sudoers for writes and attribute changes.
+    fix: "printf -- '-w /etc/sudoers -p wa -k scope\\n-w /etc/sudoers.d -p wa -k scope\\n' > /etc/audit/rules.d/50-scope.rules && augenrules --load"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-scope.rules: "-w /etc/sudoers -p wa -k scope\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:rule-modules
+    title: Kernel module loading is not audited
+    description: Rootkits load kernel modules; without rules on init_module/finit_module/delete_module (or kmod/insmod/modprobe) this goes unrecorded.
+    severity: low
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '\b(init_module|finit_module|delete_module)\b|-w\s+\S*/(kmod|insmod|rmmod|modprobe)\b', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Audit module load/unload syscalls.
+    fix: "echo '-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k modules' > /etc/audit/rules.d/50-modules.rules && augenrules --load"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-modules.rules: "-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k modules\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:rule-time-change
+    title: System time changes are not audited
+    description: Changing the clock is used to confuse log timelines; no rule covers adjtimex/settimeofday/clock_settime or /etc/localtime.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '\b(adjtimex|settimeofday|clock_settime)\b|-w\s+/etc/localtime\b', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Audit time-change syscalls and /etc/localtime.
+    fix: "printf -- '-a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change\\n-w /etc/localtime -p wa -k time-change\\n' > /etc/audit/rules.d/50-time.rules"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-time.rules: "-a always,exit -F arch=b64 -S adjtimex,settimeofday -k time-change\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:rule-logins
+    title: Login and lockout records are not audited
+    description: No watch on lastlog/faillog/faillock, so tampering with login records is invisible.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '-w\s+/var/(log/lastlog|log/faillog|run/faillock|log/tallylog)', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Watch login record files.
+    fix: "printf -- '-w /var/log/lastlog -p wa -k logins\\n-w /var/run/faillock -p wa -k logins\\n' > /etc/audit/rules.d/50-logins.rules"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-logins.rules: "-w /var/log/lastlog -p wa -k logins\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:rule-session
+    title: Session records (utmp/wtmp/btmp) are not audited
+    description: Attackers edit wtmp/btmp to hide logins; no rule watches them.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '-w\s+/var/(run/utmp|log/wtmp|log/btmp)', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Watch the session record files.
+    fix: "printf -- '-w /var/run/utmp -p wa -k session\\n-w /var/log/wtmp -p wa -k session\\n-w /var/log/btmp -p wa -k session\\n' > /etc/audit/rules.d/50-session.rules"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-session.rules: "-w /var/log/wtmp -p wa -k session\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:rule-perm-mod
+    title: Permission and ownership changes are not audited
+    description: No rule on chmod/chown/setxattr families, so permission tampering (e.g. making a file setuid) leaves no trace.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '\b(chmod|fchmod|fchmodat|chown|fchown|lchown|fchownat|setxattr|lsetxattr|fsetxattr)\b', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Audit permission-change syscalls by regular users.
+    fix: "echo '-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat,chown,fchown,lchown,fchownat -F auid>=1000 -F auid!=unset -k perm_mod' > /etc/audit/rules.d/50-perm_mod.rules"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-perm.rules: "-a always,exit -F arch=b64 -S chmod,fchmod -F auid>=1000 -k perm_mod\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:rule-mounts
+    title: Filesystem mounts by users are not audited
+    description: Mounting removable media or images is a data-exfiltration and privilege path; no rule covers the mount syscall.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '-S\s+\S*\bmount\b', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Audit the mount syscall for regular users.
+    fix: "echo '-a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=unset -k mounts' > /etc/audit/rules.d/50-mounts.rules"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-mounts.rules: "-a always,exit -F arch=b64 -S mount -F auid>=1000 -k mounts\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:rule-delete
+    title: File deletions by users are not audited
+    description: No rule on unlink/rename families, so deleted evidence cannot be attributed.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '\b(unlink|unlinkat|rename|renameat)\b', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Audit deletion and rename syscalls for regular users.
+    fix: "echo '-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=unset -k delete' > /etc/audit/rules.d/50-delete.rules"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-delete.rules: "-a always,exit -F arch=b64 -S unlink,unlinkat -F auid>=1000 -k delete\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:rule-mac-policy
+    title: Changes to SELinux/AppArmor policy are not audited
+    description: Disabling or loosening the MAC policy is a common post-exploitation step; no watch covers /etc/selinux or /etc/apparmor(.d).
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '-w\s+/(etc|usr/share)/(selinux|apparmor)', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Watch the MAC policy directories.
+    fix: "printf -- '-w /etc/selinux -p wa -k MAC-policy\\n-w /etc/apparmor.d -p wa -k MAC-policy\\n' > /etc/audit/rules.d/50-mac.rules"
+    tests:
+      pass: {files: {/etc/audit/rules.d/50-mac.rules: "-w /etc/selinux/ -p wa -k MAC-policy\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n"}}
+
+  - id: audit:immutable
+    title: Audit rules are not locked (-e 2)
+    description: Without '-e 2' as the final rule, root can silently disable or rewrite audit rules at runtime; with it, changes need a reboot.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: [audit, auditd]}
+    probe: {type: content, path: [/etc/audit/rules.d/*.rules, /etc/audit/audit.rules], regex: '^\s*-e\s+2\b', combine: true}
+    expect: ["match eq true"]
+    missing: fail
+    remediation: Make the audit configuration immutable.
+    fix: "echo '-e 2' > /etc/audit/rules.d/99-finalize.rules && augenrules --load"
+    tests:
+      pass: {files: {/etc/audit/rules.d/99-finalize.rules: "-e 2\n"}}
+      fail: {files: {/etc/audit/rules.d/audit.rules: "-D\n-e 1\n"}}

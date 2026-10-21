@@ -1,0 +1,312 @@
+pack: services-legacy
+title: Legacy and unneeded network services
+description: Cleartext remote-login services (telnet, rsh/rlogin/rexec), TFTP, inetd super-servers, NIS, talk/finger, the 'small services' (echo, discard, daytime, chargen, time) and desktop discovery/print daemons that have no place on most servers.
+category: network
+references:
+  - https://www.cisecurity.org/cis-benchmarks
+test_base:
+  packages: {bash: "5.2.15-2"}
+checks:
+  - id: svc:telnet-listening
+    title: Telnet server listening
+    description: Telnet sends credentials (often root's) in cleartext and has no protection against interception or brute force.
+    severity: high
+    level: basic
+    probe: {type: listener, ports: 23, proto: tcp}
+    expect_none: true
+    evidence: "{_loc}"
+    remediation: Stop and remove the telnet server; use SSH.
+    fix: "systemctl disable --now telnet.socket; dnf remove telnet-server   # or apt-get purge telnetd"
+    tests:
+      pass: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\n"}}
+      fail: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 64 *:23 *:* users:((\"systemd\",pid=1,fd=40))\n"}}
+      skip: {cmds: {}}
+
+  - id: svc:telnet-server
+    title: Telnet server package installed
+    description: An installed telnet daemon can be enabled by a socket unit or inetd at any time; remove it.
+    severity: medium
+    tags: [cis]
+    probe: {type: package, name: [telnet-server, telnetd, inetutils-telnetd, telnetd-ssl]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the telnet server package.
+    fix: "dnf remove {name}   # or apt-get purge {name}"
+    tests:
+      pass: {packages: {telnet: "0.17-85"}}
+      fail: {packages: {telnetd: "0.17-44"}}
+
+  - id: svc:rsh-listening
+    title: rexec/rlogin server listening (512/513 tcp)
+    description: The r-services authenticate by host trust or cleartext passwords and are trivially abused.
+    severity: high
+    level: basic
+    probe: {type: listener, ports: [512, 513], proto: tcp}
+    expect_none: true
+    evidence: "{_loc}"
+    remediation: Disable the r-services and remove rsh-server.
+    fix: "systemctl disable --now rlogin.socket rexec.socket rsh.socket; dnf remove rsh-server"
+    tests:
+      pass: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"}}
+      fail: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 64 *:513 *:* users:((\"systemd\",pid=1,fd=41))\n"}}
+
+  - id: svc:rsh-server
+    title: rsh/rlogin/rexec server package installed
+    description: The r-services trust .rhosts and send credentials in cleartext.
+    severity: high
+    tags: [cis]
+    probe: {type: package, name: [rsh-server, rsh-redone-server]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the rsh server package.
+    fix: "dnf remove {name}   # or apt-get purge {name}"
+    tests:
+      pass: {packages: {openssh-server: "9.2"}}
+      fail: {packages: {rsh-server: "0.17-79"}}
+
+  - id: svc:rsh-client
+    title: rsh client installed
+    description: The rsh client sends credentials in cleartext; scripts using it should move to ssh.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: package, name: [rsh, rsh-client, rsh-redone-client]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the rsh client.
+    fix: "dnf remove {name}   # or apt-get purge {name}"
+    tests:
+      pass: {packages: {openssh-clients: "8.7"}}
+      fail: {packages: {rsh: "0.17-79"}}
+
+  - id: svc:telnet-client
+    title: telnet client installed
+    description: The telnet client encourages cleartext logins to network devices; CIS recommends removing it (use nc/openssl s_client for port tests).
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: package, name: [telnet]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the telnet client.
+    fix: "dnf remove telnet   # or apt-get purge telnet"
+    tests:
+      pass: {packages: {nmap-ncat: "7.92"}}
+      fail: {packages: {telnet: "0.17-85"}}
+
+  - id: svc:tftp-server
+    title: TFTP server installed
+    description: TFTP has no authentication; anything in its root is readable (and often writable) by anyone who can reach UDP 69. Only PXE/network-boot hosts need it.
+    severity: medium
+    tags: [cis]
+    probe: {type: package, name: [tftp-server, tftpd-hpa, tftpd, atftpd]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the TFTP server unless this host serves network boot; if it does, restrict it to the provisioning network.
+    fix: "dnf remove {name}   # or apt-get purge {name}"
+    tests:
+      pass: {packages: {tftp: "5.2"}}
+      fail: {packages: {tftpd-hpa: "5.2"}}
+
+  - id: svc:inetd
+    title: inetd/xinetd super-server installed
+    description: inetd-style super-servers usually exist only to run legacy services (telnet, tftp, rsh, echo/chargen); modern daemons and systemd sockets replace them.
+    severity: low
+    tags: [cis]
+    probe: {type: package, name: [xinetd, openbsd-inetd, inetutils-inetd, rlinetd]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the super-server after migrating any service it runs.
+    fix: "dnf remove xinetd   # or apt-get purge {name}"
+    tests:
+      pass: {packages: {systemd: "252"}}
+      fail: {packages: {xinetd: "2.3.15-24"}}
+
+  - id: svc:small-services
+    title: echo/discard/daytime/chargen/time service listening
+    description: The 'small services' (ports 7, 9, 13, 19, 37) are useless today and chargen/echo are classic UDP reflection/amplification vectors.
+    severity: medium
+    probe: {type: listener, ports: [7, 9, 13, 19, 37]}
+    expect_none: true
+    evidence: "{_loc}"
+    remediation: Disable the services in xinetd/inetd (or their systemd sockets).
+    fix: "grep -l 'disable.*no' /etc/xinetd.d/* ; set 'disable = yes' for echo/discard/daytime/chargen/time and restart xinetd"
+    tests:
+      pass: {cmds: {"ss -H -tulnp": "udp UNCONN 0 0 0.0.0.0:68 0.0.0.0:*\n"}}
+      fail: {cmds: {"ss -H -tulnp": "udp UNCONN 0 0 0.0.0.0:19 0.0.0.0:* users:((\"xinetd\",pid=9,fd=5))\n"}}
+
+  - id: svc:nis-server
+    title: NIS server (ypserv) installed
+    description: NIS distributes password hashes over the network with no meaningful authentication.
+    severity: medium
+    tags: [cis]
+    probe: {type: package, name: [ypserv]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove ypserv and migrate to LDAP/Kerberos (FreeIPA, AD).
+    fix: "dnf remove ypserv   # or apt-get purge ypserv"
+    tests:
+      pass: {packages: {sssd: "2.9"}}
+      fail: {packages: {ypserv: "4.1"}}
+
+  - id: svc:nis-client
+    title: NIS client installed
+    description: NIS clients accept account data (including hashes) from an unauthenticated network service.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: package, name: [ypbind, nis]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the NIS client and use SSSD with LDAP/Kerberos.
+    fix: "dnf remove ypbind   # or apt-get purge nis"
+    tests:
+      pass: {packages: {sssd: "2.9"}}
+      fail: {packages: {ypbind: "2.7"}}
+
+  - id: svc:talk-server
+    title: talk server installed
+    description: talk/ntalk is an unauthenticated legacy chat service with no use on servers.
+    severity: low
+    tags: [cis]
+    probe: {type: package, name: [talk-server, talkd, inetutils-talkd]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the talk server.
+    fix: "dnf remove talk-server   # or apt-get purge {name}"
+    tests:
+      pass: {packages: {bash: "5.2"}}
+      fail: {packages: {talkd: "0.17"}}
+
+  - id: svc:finger-server
+    title: finger server installed
+    description: fingerd discloses local usernames, home directories and login times to anyone who asks.
+    severity: low
+    probe: {type: package, name: [finger-server, fingerd, cfingerd, efingerd]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the finger daemon.
+    fix: "dnf remove finger-server   # or apt-get purge {name}"
+    tests:
+      pass: {packages: {finger: "0.17"}}
+      fail: {packages: {fingerd: "0.17"}}
+
+  - id: svc:avahi
+    title: Avahi (mDNS/DNS-SD) daemon running
+    description: Avahi advertises host services on the local network and listens on UDP 5353; servers rarely need zero-configuration discovery.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: systemd, name: [avahi-daemon.service, avahi-daemon.socket]}
+    where: ["ActiveState eq active"]
+    expect_none: true
+    evidence: "{unit} is active"
+    remediation: Disable Avahi on servers.
+    fix: systemctl disable --now avahi-daemon.socket avahi-daemon.service
+    tests:
+      pass:
+        cmds:
+          "systemctl show avahi-daemon.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\n"
+          "systemctl show avahi-daemon.socket --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+      fail:
+        findings: 1
+        cmds:
+          "systemctl show avahi-daemon.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\n"
+          "systemctl show avahi-daemon.socket --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\n"
+
+  - id: svc:cups
+    title: CUPS print service running
+    description: cupsd parses network print jobs and has had remotely exploitable bugs (cups-browsed, CVE-2024-47176); servers that don't print shouldn't run it.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: systemd, name: [cups.service, cups.socket, cups-browsed.service]}
+    where: ["ActiveState eq active"]
+    expect_none: true
+    evidence: "{unit} is active"
+    severity_if:
+      - {when: "unit eq cups-browsed.service", severity: medium}
+    remediation: Disable CUPS (and especially cups-browsed) on servers.
+    fix: "systemctl disable --now cups.socket cups.service cups-browsed.service"
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2024-47176]
+    tests:
+      pass:
+        cmds:
+          "systemctl show cups.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+          "systemctl show cups.socket --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+          "systemctl show cups-browsed.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+      fail:
+        severity: medium
+        cmds:
+          "systemctl show cups.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\n"
+          "systemctl show cups.socket --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+          "systemctl show cups-browsed.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\n"
+
+  - id: svc:rpcbind-unused
+    title: rpcbind running without NFS or NIS
+    description: rpcbind is only needed by NFS and NIS; when neither is installed it is pure attack surface (and an amplification vector on UDP 111).
+    severity: low
+    tags: [cis]
+    applies_if: {not: {package: [nfs-utils, nfs-kernel-server, nfs-common, ypbind, ypserv, nis, glusterfs-server]}}
+    probe: {type: systemd, name: [rpcbind.service, rpcbind.socket]}
+    where: ["ActiveState eq active"]
+    expect_none: true
+    evidence: "{unit} is active"
+    remediation: Stop and mask rpcbind.
+    fix: systemctl disable --now rpcbind.socket rpcbind.service && systemctl mask rpcbind.socket rpcbind.service
+    tests:
+      pass:
+        cmds:
+          "systemctl show rpcbind.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\n"
+          "systemctl show rpcbind.socket --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\n"
+      fail:
+        findings: 2
+        cmds:
+          "systemctl show rpcbind.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\n"
+          "systemctl show rpcbind.socket --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\n"
+      na: {packages: {nfs-utils: "2.5.4"}}
+
+  - id: svc:x-server
+    title: X Window server installed on a server
+    description: A graphical stack adds a large amount of code (and setuid helpers) that headless servers don't need.
+    severity: info
+    level: strict
+    tags: [cis]
+    probe: {type: package, name: [xorg-x11-server-Xorg, xserver-xorg-core, xorg-server, xwayland]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the X server from headless servers.
+    fix: "dnf remove xorg-x11-server-Xorg   # or apt-get purge xserver-xorg-core"
+    tests:
+      pass: {packages: {bash: "5.2"}}
+      fail: {packages: {xserver-xorg-core: "21.1.7"}}
+
+  - id: svc:prelink
+    title: prelink installed
+    description: prelink rewrites binaries in place, which defeats file-integrity monitoring and weakens ASLR for prelinked libraries.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: package, name: [prelink]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Undo prelinking and remove the package.
+    fix: "prelink -ua && dnf remove prelink"
+    tests:
+      pass: {packages: {bash: "5.2"}}
+      fail: {packages: {prelink: "0.5.0"}}
+
+  - id: svc:dhcp-server
+    title: DHCP server installed
+    description: A DHCP server on a host that isn't meant to provide addresses can hijack clients' routing and DNS.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: package, name: [dhcp-server, isc-dhcp-server]}
+    expect_none: true
+    evidence: "{_loc} installed"
+    remediation: Remove the DHCP server unless this host is the network's DHCP server.
+    fix: "dnf remove dhcp-server   # or apt-get purge isc-dhcp-server"
+    tests:
+      pass: {packages: {dhcp-client: "4.4"}}
+      fail: {packages: {isc-dhcp-server: "4.4.3"}}
