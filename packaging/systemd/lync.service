@@ -1,0 +1,27 @@
+[Unit]
+Description=Lync vulnerability scanner
+Documentation=https://github.com/ryan785/lync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/sbin/lyncd
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — adjust as needed; full root is required for /proc/*/maps and
+# rpm/dpkg DB access on all package managers.
+ProtectSystem=full
+# read-only, not true: ProtectHome=true hides /root entirely, which blinds
+# the file-integrity monitor to /root/.ssh/authorized_keys (a default watch
+# path) and the account rules that inspect home directories.
+ProtectHome=read-only
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

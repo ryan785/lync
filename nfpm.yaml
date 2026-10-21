@@ -1,0 +1,40 @@
+name: lync
+arch: amd64
+platform: linux
+version: 0.1.0
+section: admin
+priority: optional
+maintainer: ryan785 <noreply@example.com>
+description: |
+  Linux vulnerability scanner. Single-binary systemd daemon that correlates
+  installed packages, kernel, and (Phase 4+) runtime state against multiple
+  CVE and advisory feeds, emitting PDF and JSON reports.
+homepage: https://github.com/ryan785/lync
+license: MIT
+
+contents:
+  - src: bin/lyncd
+    dst: /usr/sbin/lyncd
+    file_info:
+      mode: 0755
+  - src: bin/lync
+    dst: /usr/bin/lync
+    file_info:
+      mode: 0755
+  - src: packaging/config/lync.yaml
+    dst: /etc/lync/lync.yaml
+    type: config|noreplace
+  - src: packaging/systemd/lync.service
+    dst: /usr/lib/systemd/system/lync.service
+  - dst: /etc/lync/rules.d
+    type: dir
+  - dst: /var/lib/lync/feeds
+    type: dir
+  - dst: /var/lib/lync/reports
+    type: dir
+  - dst: /var/log/lync
+    type: dir
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh

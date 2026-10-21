@@ -1,0 +1,87 @@
+# Lync vulnerability scanner — default configuration.
+
+log:
+  level: info        # error | warn | info | debug
+  format: logfmt     # logfmt | json
+
+scan:
+  interval: 24h
+  on_start: false    # run a scan immediately at daemon startup
+
+feed:
+  sync_interval: 6h
+  cache_dir: /var/lib/lync/feeds
+  sources:
+    - name: redhat   # Red Hat Security Data API — RHEL/Rocky/Alma fix versions (rolling 365-day window)
+      enabled: true
+    - name: osv      # OSV.dev bulk export for this host's distro (Rocky Linux:N, AlmaLinux:N,
+      enabled: true  # Debian:N, Ubuntu:X, Alpine:vX). Full advisory history with per-RPM
+                     # fixed versions, including appstream module packages (php, nodejs, ...).
+    - name: nvd      # NIST NVD — universal CVE baseline
+      enabled: true
+      # Optional API key. Without one, NVD enforces 5 requests / 30 sec and
+      # we pull a 30-day window to stay under ~2 minutes per sync. With a
+      # key, we pull a full 120-day window in seconds. Get a free key at
+      # https://nvd.nist.gov/developers/request-an-api-key
+      api_key: ""
+
+report:
+  dir: /var/lib/lync/reports
+  retention_days: 0  # 0 = keep all reports
+
+ipc:
+  socket: /run/lync.sock
+
+# Applicability filter — after the matcher proposes findings, each one is
+# checked against the upstream distro's curated stance. Statuses listed in
+# `suppress_on` cause the finding to be dropped from the report.
+#   not_affected        - distro explicitly reviewed and says it doesn't apply
+#   deferred_or_wontfix - distro acknowledges the bug but won't ship a fix
+#                         (typically because real-world impact is low or the
+#                         stream is EOL)
+applicability:
+  enabled: true
+  concurrency: 5
+  suppress_on:
+    - not_affected
+    - deferred_or_wontfix
+
+# Non-CVE rules engine — hardening, sshd, accounts, filesystem, network,
+# EOL, web-server, firewall, login-defs, mount, SELinux/AppArmor.
+#
+#   level: basic    — only highest-impact, near-zero-false-positive checks
+#   level: medium   — default; broad hardening that fits most servers
+#   level: strict   — comprehensive CIS-Benchmark-style coverage (noisier)
+rules:
+  enabled: true
+  level: medium
+  # Turn checks off/on by check ID, ID prefix or rule name. `lync checks`
+  # lists every ID and whether it is on. enable wins over disable and is
+  # required for opt-in checks.
+  disable: []
+  #  - cockpit:enabled
+  #  - container:latest-tag
+  enable: []
+  #  - container:php-upload-progress   # runs `docker exec <c> php -r ...`
+  image_max_age_days: 365     # container:image-age threshold
+  wireguard_stale_days: 90    # wireguard:stale-peer threshold
+  secret_scan_dirs: []        # extra roots for compose/.env secret scan
+
+# Runtime monitor — kernel-pushed inotify events on a small list of
+# critical config files. Out-of-band changes (the file was modified
+# without a package transaction in flight) become "runtime" findings on
+# the next scan.
+monitor:
+  enabled: true
+  file_integrity:
+    enabled: true
+    paths:
+      - /etc/ssh/sshd_config
+      - /etc/sudoers
+      - /etc/sudoers.d
+      - /etc/passwd
+      - /etc/shadow
+      - /etc/pam.d
+      - /etc/crontab
+      - /etc/cron.d
+      - /root/.ssh/authorized_keys

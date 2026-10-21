@@ -1,0 +1,52 @@
+name: release
+
+# Push a tag like v0.2.0 to publish static linux/amd64 + linux/arm64
+# binaries, run.sh and SHA256SUMS as a GitHub Release. run.sh and lync-run
+# download exactly these asset names.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: CGO_ENABLED=0 go test ./...
+
+      - name: Shellcheck
+        run: shellcheck -s sh run.sh lync-run tests/runner-selftest.sh
+
+      - name: Build release artifacts
+        run: make release
+
+      - name: Runner self-test (fake ssh, offline)
+        run: sudo sh tests/runner-selftest.sh
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --notes "Static lyncd/lync for linux amd64+arm64, run.sh, SHA256SUMS. See docs/RUNNER.md."
+          fi

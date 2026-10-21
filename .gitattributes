@@ -1,0 +1,15 @@
+# Linux-only files: always LF, even on Windows checkouts.
+*.sh           text eol=lf
+*.service      text eol=lf
+Makefile       text eol=lf
+
+# Go source — LF for consistency with gofmt.
+*.go           text eol=lf
+
+# YAML, configs, docs — LF.
+*.yaml         text eol=lf
+*.yml          text eol=lf
+*.md           text eol=lf
+*.mod          text eol=lf
+*.sum          text eol=lf
+lync-run       text eol=lf

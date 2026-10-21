@@ -1,0 +1,239 @@
+#!/bin/sh
+# lync-run - run Lync on remote hosts over SSH without installing anything.
+#
+#   ./lync-run root@host1.example.com
+#   ./lync-run --cve CVE-2026-109618 root@a root@b
+#   ./lync-run -f hosts.txt --cache ~/.cache/lync-feeds
+#
+# For each host: probe arch/OS, stream a tar bundle (static lyncd for the
+# host's arch + SHA256SUMS [+ feed cache] [+ NVD key]) into `sh -c <run.sh>`
+# over one SSH session, receive the results as a tar stream on stdout,
+# fetch the host's run log, and verify the remote temp dir is gone. The
+# host keeps only its log (/var/log/lync-run-<UTC>.log). Works from Git
+# Bash on Windows (needs ssh, tar, sha256sum).
+#
+# Binaries come from --bin DIR (default: ./dist from `make release`), or
+# from the latest GitHub release via `gh release download` if dist/ lacks
+# them.
+#
+# Exit codes: 0 every host produced results (see the table for degraded /
+# CVE verdicts) | 1 usage | 2 local preflight (no binary, no ssh/tar) |
+# 4 one or more hosts failed.
+
+set -u
+umask 077
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+BIN_DIR=$HERE/dist
+OUT_ROOT=./lync-results
+CACHE_ROOT=""
+CVE=""
+NVD_KEY_FILE=""
+CONTAINER_EXEC=0
+KEEP_REPORT=""
+HOSTS=""
+HOSTS_FILE=""
+SSH_OPTS=${LYNC_SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30}
+SSH=${LYNC_SSH:-ssh}
+REMOTE_LOG=""
+SOURCES=""
+REPO=${LYNC_REPO:-ryan785/lync}
+
+usage() {
+	cat >&2 <<'EOF'
+usage: lync-run [options] HOST... | -f HOSTS_FILE
+  --cve ID            single-CVE check instead of a full scan
+  --cache DIR         local feed cache root; reused and refreshed per OS
+                      (DIR/<os-id>-<major>/), so fleet runs download once
+  --nvd-key-file F    file holding an NVD API key (sent inside the bundle,
+                      never on a command line)
+  --container-exec    enable the opt-in `docker exec php -r` check
+  --keep-report DIR   also keep the report on the host in DIR
+  --bin DIR           dir with lyncd-linux-{amd64,arm64} + SHA256SUMS (default ./dist)
+  --out DIR           results root (default ./lync-results)
+  --remote-log PATH   log path on the host (default /var/log/lync-run-<UTC>.log)
+  --sources LIST      feeds: auto (default) | none | comma list
+  -f FILE             hosts, one per line (# comments ok)
+Env: LYNC_SSH (ssh command; tests use a fake), LYNC_SSH_OPTS (default: -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30)
+EOF
+	exit 1
+}
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	--cve) [ $# -ge 2 ] || usage; CVE=$2; shift ;;
+	--cache) [ $# -ge 2 ] || usage; CACHE_ROOT=$2; shift ;;
+	--nvd-key-file) [ $# -ge 2 ] || usage; NVD_KEY_FILE=$2; shift ;;
+	--keep-report) [ $# -ge 2 ] || usage; KEEP_REPORT=$2; shift ;;
+	--remote-log) [ $# -ge 2 ] || usage; REMOTE_LOG=$2; shift ;;
+	--sources) [ $# -ge 2 ] || usage; SOURCES=$2; shift ;;
+	--bin) [ $# -ge 2 ] || usage; BIN_DIR=$2; shift ;;
+	--out) [ $# -ge 2 ] || usage; OUT_ROOT=$2; shift ;;
+	-f) [ $# -ge 2 ] || usage; HOSTS_FILE=$2; shift ;;
+	--container-exec) CONTAINER_EXEC=1 ;;
+	-h | --help) usage ;;
+	-*) echo "lync-run: unknown option $1" >&2; usage ;;
+	*) HOSTS="$HOSTS $1" ;;
+	esac
+	shift
+done
+if [ -n "$HOSTS_FILE" ]; then
+	[ -f "$HOSTS_FILE" ] || { echo "lync-run: no such hosts file $HOSTS_FILE" >&2; exit 1; }
+	HOSTS="$HOSTS $(sed 's/#.*//' "$HOSTS_FILE" | tr -s ' \t\r' '\n' | grep -v '^$' | tr '\n' ' ')"
+fi
+[ -n "$(echo "$HOSTS" | tr -d ' ')" ] || usage
+for tool in "$SSH" tar sha256sum awk sed; do
+	command -v "$tool" >/dev/null 2>&1 || { echo "lync-run: need $tool" >&2; exit 2; }
+done
+[ -f "$HERE/run.sh" ] || { echo "lync-run: run.sh not found next to lync-run" >&2; exit 2; }
+if [ -n "$NVD_KEY_FILE" ] && [ ! -r "$NVD_KEY_FILE" ]; then
+	echo "lync-run: cannot read $NVD_KEY_FILE" >&2
+	exit 1
+fi
+
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+RUN_DIR=$OUT_ROOT/$TS
+mkdir -p "$RUN_DIR"
+LOCAL_TMP=$(mktemp -d "${TMPDIR:-/tmp}/lync-run-local.XXXXXX")
+trap 'rm -rf "$LOCAL_TMP"' EXIT INT TERM HUP
+
+# Remote command: the whole of run.sh as `sh -c '<script>'`, single-quote
+# escaped. Nothing is written to the host before run.sh picks its temp dir.
+SCRIPT_Q=$(sed "s/'/'\\\\''/g" "$HERE/run.sh")
+
+binary_for() { # ARCH -> path (fetches from GitHub release when missing)
+	b=$BIN_DIR/lyncd-linux-$1
+	if [ ! -f "$b" ] || [ ! -f "$BIN_DIR/SHA256SUMS" ]; then
+		if command -v gh >/dev/null 2>&1; then
+			mkdir -p "$LOCAL_TMP/gh"
+			gh release download --repo "$REPO" --clobber -D "$LOCAL_TMP/gh" \
+				-p "lyncd-linux-$1" -p SHA256SUMS >&2 || return 1
+			BIN_DIR=$LOCAL_TMP/gh
+			b=$BIN_DIR/lyncd-linux-$1
+		else
+			return 1
+		fi
+	fi
+	echo "$b"
+}
+
+field() { # KEY FILE -> first numeric value of "KEY": N
+	[ -f "$2" ] || return 0
+	tr ',' '\n' <"$2" | awk -F: -v k="\"$1\"" '$1 ~ k {gsub(/[^0-9]/, "", $2); print $2; exit}'
+}
+
+SUMMARY=$LOCAL_TMP/summary
+printf '%-28s %-5s %-5s %-5s %-5s %-5s %-6s %-18s %s\n' HOST EXIT CRIT HIGH MED LOW TOTAL VERDICT REMOTE-TMP >"$SUMMARY"
+FAILED=0
+
+for host in $HOSTS; do
+	name=$(echo "$host" | sed 's/.*@//')
+	hd=$RUN_DIR/$name
+	mkdir -p "$hd"
+	echo "== $host" >&2
+
+	# shellcheck disable=SC2086,SC2016 # SSH_OPTS is a list; $ID expands remotely
+	probe=$("$SSH" $SSH_OPTS "$host" 'uname -m; . /etc/os-release 2>/dev/null; echo "${ID:-unknown}-${VERSION_ID%%.*}"' 2>"$hd/ssh-probe.err")
+	if [ -z "$probe" ]; then
+		echo "   ssh probe failed: $(head -c 300 "$hd/ssh-probe.err")" >&2
+		printf '%-28s %-5s %-5s %-5s %-5s %-5s %-6s %-18s %s\n' "$name" ssh - - - - - - - >>"$SUMMARY"
+		FAILED=1
+		continue
+	fi
+	march=$(echo "$probe" | sed -n 1p)
+	oskey=$(echo "$probe" | sed -n 2p)
+	case $march in
+	x86_64 | amd64) arch=amd64 ;;
+	aarch64 | arm64) arch=arm64 ;;
+	*) echo "   unsupported arch $march" >&2; FAILED=1; continue ;;
+	esac
+	bin=$(binary_for "$arch") || {
+		echo "lync-run: no lyncd-linux-$arch in $BIN_DIR (run: make release) and gh download failed" >&2
+		exit 2
+	}
+
+	# Bundle: binary + checksum (+ cache, + NVD key).
+	stage=$LOCAL_TMP/stage-$name
+	rm -rf "$stage"
+	mkdir -p "$stage"
+	cp "$bin" "$stage/lyncd-linux-$arch"
+	grep " \*\{0,1\}lyncd-linux-$arch\$" "$(dirname "$bin")/SHA256SUMS" >"$stage/SHA256SUMS"
+	local_sum=$(sha256sum "$stage/lyncd-linux-$arch" | awk '{print $1}')
+	grep -q "^$local_sum " "$stage/SHA256SUMS" || {
+		echo "lync-run: local $bin does not match SHA256SUMS" >&2
+		exit 2
+	}
+	[ -n "$NVD_KEY_FILE" ] && tr -d ' \r\n' <"$NVD_KEY_FILE" >"$stage/nvd.key"
+	args="--bundle-stdin --tar-out"
+	if [ -n "$CACHE_ROOT" ]; then
+		args="$args --save-cache"
+		if [ -d "$CACHE_ROOT/$oskey" ]; then
+			cp -R "$CACHE_ROOT/$oskey" "$stage/cache"
+		fi
+	fi
+	[ -n "$CVE" ] && args="$args --cve $CVE"
+	[ "$CONTAINER_EXEC" = 1 ] && args="$args --container-exec"
+	[ -n "$KEEP_REPORT" ] && args="$args --keep-report $KEEP_REPORT"
+	[ -n "$REMOTE_LOG" ] && args="$args --log $REMOTE_LOG"
+	[ -n "$SOURCES" ] && args="$args --sources $SOURCES"
+
+	echo "   $march ($oskey): streaming $(du -sk "$stage" | awk '{print $1}')KB bundle, running..." >&2
+	start=$(date +%s)
+	# shellcheck disable=SC2086 # SSH_OPTS and args are option lists
+	tar -cf - -C "$stage" . | "$SSH" $SSH_OPTS "$host" "sh -c '$SCRIPT_Q' run.sh $args" \
+		>"$hd/result.tar" 2>"$hd/remote-stderr.txt"
+	rc=$?
+	rm -rf "$stage"
+	echo "   remote exit $rc after $(($(date +%s) - start))s" >&2
+
+	if [ -s "$hd/result.tar" ]; then
+		tar -xf "$hd/result.tar" -C "$hd" && rm -f "$hd/result.tar"
+	fi
+	if [ -d "$hd/cache" ]; then
+		if [ -n "$CACHE_ROOT" ]; then
+			mkdir -p "$CACHE_ROOT"
+			rm -rf "${CACHE_ROOT:?}/$oskey"
+			mv "$hd/cache" "$CACHE_ROOT/$oskey"
+		else
+			rm -rf "$hd/cache"
+		fi
+	fi
+	for f in "$hd"/lync-*.json; do [ -f "$f" ] && mv "$f" "$hd/report.json"; done
+	for f in "$hd"/lync-*.pdf; do [ -f "$f" ] && mv "$f" "$hd/report.pdf"; done
+
+	# Fetch the host's run log and confirm the temp dir is gone.
+	rlog=$(sed -n 's/^LYNC_LOG_PATH=//p' "$hd/remote-stderr.txt" | tail -n 1)
+	rtmp=""
+	tmpstate=-
+	if [ -n "$rlog" ]; then
+		# shellcheck disable=SC2086
+		"$SSH" $SSH_OPTS "$host" "cat '$rlog'" >"$hd/lync-run.log" 2>/dev/null
+		rtmp=$(sed -n 's/.* TMP *using \([^ ]*\) .*/\1/p' "$hd/lync-run.log" | head -n 1)
+		if [ -n "$rtmp" ]; then
+			# shellcheck disable=SC2086
+			if "$SSH" $SSH_OPTS "$host" "test ! -e '$rtmp'" 2>/dev/null; then tmpstate=removed; else tmpstate=PRESENT; fi
+		fi
+		echo "   host log: $rlog (copy: $hd/lync-run.log); temp dir $rtmp: $tmpstate" >&2
+	fi
+
+	verdict=-
+	if [ -n "$CVE" ] && [ -f "$hd/cve-$CVE.json" ]; then
+		verdict=$(tr ',' '\n' <"$hd/cve-$CVE.json" | sed -n 's/.*"verdict": *"\([a-z_]*\)".*/\1/p' | head -n 1)
+	fi
+	case $rc in
+	0 | 10 | 11 | 12) ;;
+	5) if [ "$verdict" = - ]; then verdict=degraded; else verdict="$verdict+degraded"; fi ;;
+	*) FAILED=1 ;;
+	esac
+	r=$hd/report.json
+	printf '%-28s %-5s %-5s %-5s %-5s %-5s %-6s %-18s %s\n' "$name" "$rc" \
+		"$(field critical "$r")" "$(field high "$r")" "$(field medium "$r")" "$(field low "$r")" "$(field total "$r")" \
+		"$verdict" "$tmpstate" >>"$SUMMARY"
+done
+
+echo >&2
+cat "$SUMMARY"
+cp "$SUMMARY" "$RUN_DIR/summary.txt"
+echo "results: $RUN_DIR" >&2
+[ "$FAILED" = 0 ] || exit 4
+exit 0

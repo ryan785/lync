@@ -1,0 +1,10 @@
+bin/
+dist/
+*.rpm
+*.deb
+*.tar.gz
+vendor/
+.idea/
+.vscode/
+*.swp
+.DS_Store
