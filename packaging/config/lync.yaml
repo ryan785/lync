@@ -5,11 +5,13 @@ log:
   format: logfmt     # logfmt | json
 
 scan:
-  interval: 24h
+  interval: 6h       # lookup mode queries the sources on every scan
   on_start: false    # run a scan immediately at daemon startup
 
 feed:
-  sync_interval: 6h
+  mode: lookup       # lookup: per-package/per-CVE API queries (sends package names+versions
+                     # to api.osv.dev); full: bulk feed downloads. See docs/CONFIGURATION.md
+  sync_interval: 6h  # full mode only
   cache_dir: /var/lib/lync/feeds
   sources:
     - name: redhat   # Red Hat Security Data API — RHEL/Rocky/Alma fix versions (rolling 365-day window)
@@ -85,3 +87,9 @@ monitor:
       - /etc/crontab
       - /etc/cron.d
       - /root/.ssh/authorized_keys
+
+# Notifications (off by default): email and Slack/Discord/Teams/generic
+# webhooks on new findings, new fixes and resolved findings. See the
+# notify section of docs/CONFIGURATION.md; check with: lync notify test
+notify:
+  enabled: false
