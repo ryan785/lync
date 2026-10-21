@@ -33,11 +33,12 @@ const (
 
 func main() {
 	cfgPath := flag.String("config", "/etc/lync/lync.yaml", `path to config; "none" = built-in defaults, ignore any file`)
-	once := flag.Bool("once", false, "one-shot mode: sync stale feeds, run one full scan, print the JSON report to stdout, exit (no socket, scheduler or monitor)")
+	once := flag.Bool("once", false, "one-shot mode: run one full scan (full feed mode: sync stale feeds first), print the JSON report to stdout, exit (no socket, scheduler or monitor)")
 	cveID := flag.String("cve", "", "with -once: check a single CVE and print the verdict JSON instead of a full report")
 	cacheDir := flag.String("cache-dir", "", "override feed.cache_dir (useful with -once on hosts without /var/lib/lync)")
 	reportDir := flag.String("report-dir", "", "override report.dir")
 	sources := flag.String("sources", "", `with -once: "auto" (feeds for this host's distro + OSV + NVD), "none" (rules only), or a comma list`)
+	feedMode := flag.String("feed-mode", "", `override feed.mode: "lookup" (default; per-package/per-CVE API queries, no bulk download) or "full" (bulk feed sync)`)
 	enable := flag.String("enable", "", "comma list appended to rules.enable (e.g. container:php-upload-progress)")
 	auditLog := flag.String("audit-log", "", "append an audit line for every command, fetch and file write to this file")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -81,6 +82,13 @@ func main() {
 	if *cacheDir != "" {
 		cfg.Feed.CacheDir = *cacheDir
 	}
+	if *feedMode != "" {
+		if *feedMode != "lookup" && *feedMode != "full" {
+			fmt.Fprintln(os.Stderr, "-feed-mode must be lookup or full")
+			os.Exit(exitError)
+		}
+		cfg.Feed.Mode = *feedMode
+	}
 	if *reportDir != "" {
 		cfg.Report.Dir = *reportDir
 	}
@@ -118,8 +126,8 @@ func main() {
 		// stdout carries only the JSON result; logs go to stderr.
 		log := logging.NewTo(os.Stderr, cfg.Log.Level, cfg.Log.Format)
 		start := time.Now()
-		audit.Log("LYNCD", "start version=%s mode=once cve=%q cache=%s reports=%s sources=%s enable=%s config=%s",
-			daemon.Version, *cveID, cfg.Feed.CacheDir, cfg.Report.Dir, sourceNames(cfg), strings.Join(cfg.Rules.Enable, ","), *cfgPath)
+		audit.Log("LYNCD", "start version=%s mode=once feed_mode=%s cve=%q cache=%s reports=%s sources=%s enable=%s config=%s",
+			daemon.Version, cfg.FeedMode(), *cveID, cfg.Feed.CacheDir, cfg.Report.Dir, sourceNames(cfg), strings.Join(cfg.Rules.Enable, ","), *cfgPath)
 		res, err := daemon.New(cfg, log).RunOnce(ctx, *cveID, os.Stdout)
 		code := exitOK
 		switch {

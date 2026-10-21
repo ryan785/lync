@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-pdf/fpdf"
 
+	"github.com/ryan785/lync/internal/feed"
 	"github.com/ryan785/lync/internal/finding"
 )
 
@@ -74,8 +75,9 @@ func WritePDF(path string, r *Report) error {
 
 	w.drawTitle()
 	w.drawHostBlock(r)
+	w.drawDataSources(r.DataSources)
 	w.divider()
-	w.drawExecSummary(r.Impact)
+	w.drawExecSummary(r.Impact, r.DataSources)
 	w.divider()
 	w.drawSeverityChart(r.Impact)
 	w.divider()
@@ -162,14 +164,18 @@ func (w *pdfWriter) sectionTitle(t string) {
 	pdf.Ln(7)
 }
 
-func (w *pdfWriter) drawExecSummary(s ImpactSummary) {
+func (w *pdfWriter) drawExecSummary(s ImpactSummary, ds *feed.ScanSources) {
 	pdf := w.pdf
 	w.sectionTitle("Executive summary")
 	pdf.SetFont("Helvetica", "", 10)
 	pdf.SetTextColor(20, 20, 20)
 
 	if s.TotalFindings == 0 {
-		pdf.MultiCell(contentW, 5, "No vulnerabilities detected on this host.", "", "L", false)
+		msg := "No vulnerabilities detected on this host."
+		if ds != nil && !ds.Complete {
+			msg = "No findings from the checks that completed. The CVE section is INCOMPLETE (see Data sources above), so this does not mean the host is free of known vulnerabilities."
+		}
+		pdf.MultiCell(contentW, 5, msg, "", "L", false)
 		pdf.SetTextColor(0, 0, 0)
 		return
 	}
@@ -455,4 +461,81 @@ func (w *pdfWriter) drawFindingCard(f finding.Finding, shaded bool) {
 	// Snap to predicted end-of-card so the next card starts cleanly even
 	// if MultiCell's line count diverged from our pre-measure by a hair.
 	pdf.SetY(y + cardH)
+}
+
+// drawDataSources lists where the CVE data came from (mode, sources,
+// request counts, timestamp) and, when a source failed, a red banner
+// saying the CVE section is incomplete.
+func (w *pdfWriter) drawDataSources(ds *feed.ScanSources) {
+	if ds == nil {
+		return
+	}
+	pdf := w.pdf
+	pdf.Ln(2)
+	mode := "lookup (per-package / per-CVE API queries, no bulk download)"
+	if ds.Mode == feed.ModeFull {
+		mode = "full (bulk feed downloads)"
+	}
+	label := func(k string) {
+		pdf.SetFont("Helvetica", "", 9)
+		pdf.SetTextColor(120, 120, 120)
+		pdf.Cell(25, 5, k)
+		pdf.SetFont("Helvetica", "B", 9)
+		pdf.SetTextColor(20, 20, 20)
+	}
+	label("CVE data")
+	pdf.MultiCell(contentW-25, 5, mode, "", "L", false)
+	checked := ds.CheckedAt.Format(time.RFC3339)
+	if ds.PackagesChecked > 0 {
+		checked += fmt.Sprintf("  -  %d packages checked", ds.PackagesChecked)
+	}
+	if ds.Ecosystem != "" {
+		checked += "  -  ecosystem " + ds.Ecosystem
+	}
+	label("Checked")
+	pdf.MultiCell(contentW-25, 5, checked, "", "L", false)
+	for _, s := range ds.Sources {
+		line := fmt.Sprintf("%s (%s): %s", s.Name, s.Kind, s.Status)
+		var parts []string
+		if s.Requests > 0 {
+			parts = append(parts, fmt.Sprintf("%d requests", s.Requests))
+		}
+		if s.CacheHits > 0 {
+			parts = append(parts, fmt.Sprintf("%d cached", s.CacheHits))
+		}
+		if s.Records > 0 {
+			parts = append(parts, fmt.Sprintf("%d records", s.Records))
+		}
+		if len(parts) > 0 {
+			line += ", " + strings.Join(parts, ", ")
+		}
+		if s.Detail != "" {
+			line += " - " + s.Detail
+		}
+		label("Source")
+		pdf.SetFont("Helvetica", "", 8.5)
+		pdf.MultiCell(contentW-25, 4.5, line, "", "L", false)
+	}
+	if ds.UnfixedCVEs > 0 {
+		label("No fix yet")
+		pdf.SetFont("Helvetica", "", 8.5)
+		pdf.MultiCell(contentW-25, 4.5, fmt.Sprintf("%d CVEs affect installed packages but have no fixed version published yet (not listed as findings; check them with `lync cve`).", ds.UnfixedCVEs), "", "L", false)
+	}
+	if !ds.Complete {
+		pdf.Ln(1)
+		text := "CVE SECTION INCOMPLETE: " + strings.Join(ds.IncompleteReasons, "; ")
+		pdf.SetFont("Helvetica", "B", 9)
+		lines := pdf.SplitLines([]byte(text), contentW-6)
+		h := float64(len(lines))*4.5 + 4
+		y := pdf.GetY()
+		pdf.SetFillColor(253, 236, 234)
+		pdf.Rect(contentL, y, contentW, h, "F")
+		pdf.SetFillColor(176, 0, 32)
+		pdf.Rect(contentL, y, 1.5, h, "F")
+		pdf.SetTextColor(176, 0, 32)
+		pdf.SetXY(contentL+4, y+2)
+		pdf.MultiCell(contentW-6, 4.5, text, "", "L", false)
+		pdf.SetY(y + h)
+	}
+	pdf.SetTextColor(0, 0, 0)
 }

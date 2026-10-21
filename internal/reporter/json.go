@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ryan785/lync/internal/collector"
+	"github.com/ryan785/lync/internal/feed"
 	"github.com/ryan785/lync/internal/finding"
 )
 
@@ -19,6 +20,9 @@ type Report struct {
 	Counts    Counts               `json:"counts"`
 	Impact    ImpactSummary        `json:"impact"`
 	Findings  []finding.Finding    `json:"findings"`
+	// DataSources says where the CVE data came from and whether the CVE
+	// section is complete. Absent in reports from older versions.
+	DataSources *feed.ScanSources `json:"data_sources,omitempty"`
 }
 
 type Counts struct {
@@ -69,6 +73,11 @@ func ReadJSON(path string) (*Report, error) {
 }
 
 func WriteJSON(path string, facts *collector.Facts, findings []finding.Finding, impact ImpactSummary) error {
+	return WriteReport(path, BuildReport(facts, findings, impact))
+}
+
+// WriteReport writes a prepared Report as indented JSON.
+func WriteReport(path string, r *Report) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -76,8 +85,11 @@ func WriteJSON(path string, facts *collector.Facts, findings []finding.Finding, 
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	return enc.Encode(BuildReport(facts, findings, impact))
+	if err := enc.Encode(r); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

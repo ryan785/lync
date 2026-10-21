@@ -35,6 +35,10 @@ Commands:
                       enabled under the config (no daemon needed)
   render JSON [PDF]   Re-render a PDF from a JSON report. PDF path defaults
                       to the JSON path with .pdf extension.
+  notify test [-config F]
+                      Send a test notification to every channel configured
+                      under notify: in lync.yaml and print the result
+                      (no daemon needed; exit 1 if any channel failed)
   version             Print the CLI version
   help                Show this message
 
@@ -95,6 +99,8 @@ func main() {
 		runChecks(g, rest)
 	case "render":
 		runRender(rest)
+	case "notify":
+		runNotify(g, rest)
 	case "version", "-v", "--version":
 		fmt.Println("lync", version)
 	case "help", "-h", "--help":
@@ -225,6 +231,10 @@ func runSync(c ipc.Client, g globalFlags) {
 		printJSON(resp)
 		return
 	}
+	if d, ok := resp.Data.(map[string]any); ok && d["queued"] == "none" {
+		fmt.Println(yellow("Nothing to sync:"), d["reason"])
+		return
+	}
 	fmt.Printf("%s\n", green("Feed sync queued."))
 	fmt.Printf("%s  %s\n", dim("Watch progress:"), cyan("lync status"))
 }
@@ -281,6 +291,16 @@ func formatCVE(d map[string]any) {
 		}
 		sort.Strings(names)
 		fmt.Printf("%s %s\n", dim("Known by:"), strings.Join(names, ", "))
+	}
+	if src, ok := d["sources"].(map[string]any); ok {
+		if list, ok := src["sources"].([]any); ok {
+			var parts []string
+			for _, e := range list {
+				m, _ := e.(map[string]any)
+				parts = append(parts, fmt.Sprintf("%v %v", m["name"], m["status"]))
+			}
+			fmt.Printf("%s %s\n", dim("Looked up:"), strings.Join(parts, ", "))
+		}
 	}
 	if inst, ok := d["installed"].([]any); ok && len(inst) > 0 {
 		fmt.Println(dim("Installed packages named by feeds:"))
@@ -374,6 +394,17 @@ func formatStatus(resp *ipc.Response) {
 			ss[i] = cyan(fmt.Sprint(s))
 		}
 		fmt.Printf("%-12s%s\n", "Sources:", strings.Join(ss, ", "))
+	}
+
+	if mode, ok := d["feed_mode"].(string); ok && mode != "" {
+		label := cyan(mode)
+		if mode == "lookup" {
+			label += dim(" (per-package / per-CVE queries at scan time)")
+		}
+		fmt.Printf("%-12s%s\n", "Feed mode:", label)
+	}
+	if c, ok := d["cve_data_complete"].(bool); ok && !c {
+		fmt.Printf("%-12s%s %v\n", "CVE data:", red("INCOMPLETE in the last scan:"), d["incomplete_reasons"])
 	}
 
 	if t, ok := timeField(d, "last_scan"); ok {

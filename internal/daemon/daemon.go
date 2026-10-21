@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/ryan785/lync/internal/feed"
 	"github.com/ryan785/lync/internal/finding"
 	"github.com/ryan785/lync/internal/ipc"
+	"github.com/ryan785/lync/internal/lookup"
 	"github.com/ryan785/lync/internal/matcher"
 	"github.com/ryan785/lync/internal/monitor"
 	"github.com/ryan785/lync/internal/reporter"
@@ -37,6 +39,8 @@ type Daemon struct {
 	applicEngine *applicability.Engine
 	rulesEngine  *rules.Engine
 	mon          *monitor.Monitor
+	lookup       *lookup.Client // lookup mode; nil in full mode
+	notifier     scanNotifier   // nil when notifications are off
 
 	ctx       context.Context
 	startedAt time.Time
@@ -49,6 +53,7 @@ type Daemon struct {
 	lastJSON  string
 
 	failedSources []string
+	lastSources   *feed.ScanSources
 
 	runMu     sync.Mutex
 	running   map[string]RunningJob
@@ -103,7 +108,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.runScheduledScan, d.runSync)
 	go d.sched.Run(ctx)
 
-	go d.maybeInitialSync(ctx)
+	if d.lookup == nil {
+		go d.maybeInitialSync(ctx)
+	} else {
+		go d.maybeInitialScan(ctx)
+	}
+	if d.cfg.Scan.OnPackageChange {
+		go d.watchPackages(ctx)
+	}
 
 	if _, err := sdnotify.SdNotify(false, sdnotify.SdNotifyReady); err != nil {
 		d.log.Debug("sd_notify ready", "err", err)
@@ -125,14 +137,19 @@ func (d *Daemon) setup() error {
 	}
 	d.store = store
 
-	d.sources = feed.Build(d.cfg.Feed.Sources)
-	srcNames := make([]string, len(d.sources))
-	for i, s := range d.sources {
-		srcNames[i] = s.Name()
+	if d.cfg.FeedMode() == feed.ModeFull {
+		d.sources = feed.Build(d.cfg.Feed.Sources)
+		srcNames := make([]string, len(d.sources))
+		for i, s := range d.sources {
+			srcNames[i] = s.Name()
+		}
+		d.log.Info("feed sources active", "mode", "full", "sources", srcNames)
+	} else {
+		d.lookup = buildLookup(d.cfg, d.log)
+		d.log.Info("feed sources active", "mode", "lookup", "sources", d.lookup.Names())
 	}
-	d.log.Info("feed sources active", "sources", srcNames)
 
-	d.applicEngine = buildApplicabilityEngine(d.cfg.Applicability, d.cfg.Feed.CacheDir, d.store, d.log)
+	d.applicEngine = buildApplicabilityEngine(d.cfg.Applicability, d.cfg.Feed.CacheDir, d.store, d.lookup, d.log)
 	d.log.Info("applicability engine ready",
 		"enabled", d.cfg.Applicability.Enabled,
 		"suppress_on", d.cfg.Applicability.SuppressOn)
@@ -143,6 +160,13 @@ func (d *Daemon) setup() error {
 		d.log.Info("rules engine ready", "level", rulesLevel.String(), "rules", len(rules.DefaultRules()))
 	} else {
 		d.log.Info("rules engine disabled by config")
+	}
+	if d.cfg.Notify.Enabled && d.notifier == nil {
+		n, err := newNotifier(d.cfg, d.log)
+		if err != nil {
+			return fmt.Errorf("notify: %w", err)
+		}
+		d.notifier = n
 	}
 	return nil
 }
@@ -205,22 +229,19 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 			"packages_total", len(facts.Packages))
 	}
 
-	var all []feed.Vulnerability
-	for _, src := range d.sources {
-		v, err := src.Vulnerabilities(d.store)
-		if err != nil {
-			d.log.Error("feed read failed", "source", src.Name(), "err", err)
-			audit.Log("FEED", "%s read failed: %v", src.Name(), err)
-			continue
-		}
-		audit.Log("FEED", "%s loaded vulns=%d", src.Name(), len(v))
-		all = append(all, v...)
-	}
+	all, sources := d.gatherVulns(ctx, scoped)
 
 	findings := matcher.Match(scoped, all, d.log)
 	audit.Log("MATCH", "vulns=%d candidate_findings=%d", len(all), len(findings))
 	findings, applicStats := d.applicEngine.Filter(ctx, findings, scoped)
 	audit.Log("APPLIC", "evaluated=%d suppressed=%d by_judge=%v", applicStats.Evaluated, applicStats.Suppressed, applicStats.SuppressedByJudge)
+	findings = matcher.EnrichSeverity(findings, all)
+	if d.cfg.Feed.LocalCheck && scope.IsAll() {
+		findings = d.localCrossCheck(ctx, scoped, findings, sources)
+	}
+	if !sources.Complete {
+		audit.Log("INCOMPLETE", "CVE section incomplete: %s", strings.Join(sources.IncompleteReasons, "; "))
+	}
 	if scope.IsAll() && d.rulesEngine != nil {
 		// Rules don't depend on the feed cache and aren't scoped to
 		// a single package; only run them on full-host scans.
@@ -241,7 +262,9 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 	// JSON is canonical — write it first, then render the PDF from that
 	// authoritative artifact. `lync render <path>` regenerates PDFs from
 	// historical JSON without rerunning a scan.
-	if err := reporter.WriteJSON(jsonPath, scoped, findings, impact); err != nil {
+	rep := reporter.BuildReport(scoped, findings, impact)
+	rep.DataSources = sources
+	if err := reporter.WriteReport(jsonPath, rep); err != nil {
 		d.log.Error("write json", "err", err)
 		audit.Log("REPORT", "write json failed: %v", err)
 	} else {
@@ -277,12 +300,20 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 		d.lastFinds = findings
 		d.lastPDF = pdfPath
 		d.lastJSON = jsonPath
+		d.lastSources = sources
 		d.mu.Unlock()
+		if d.notifier != nil {
+			d.notifier.Process(ctx, scoped, findings, sources, jsonPath, pdfPath)
+		}
 	}
 	return nil
 }
 
 func (d *Daemon) runSync(ctx context.Context) error {
+	if d.lookup != nil {
+		d.log.Debug("feed.mode=lookup: nothing to sync; lookups run at scan time")
+		return nil
+	}
 	id := d.registerJob("sync", "")
 	defer d.unregisterJob(id)
 	for _, src := range d.sources {
@@ -390,6 +421,10 @@ func (d *Daemon) handleIPC(req ipc.Request) ipc.Response {
 	case ipc.CmdScan:
 		return d.handleScan(req)
 	case ipc.CmdSync:
+		if d.lookup != nil {
+			return ipc.Response{OK: true, Data: map[string]any{"queued": "none",
+				"reason": "feed.mode is lookup: there are no bulk feeds to sync; every scan queries the sources directly (run `lync scan`)"}}
+		}
 		d.sched.Trigger("sync")
 		return ipc.Response{OK: true, Data: map[string]any{"queued": "sync"}}
 	case ipc.CmdReports:
@@ -415,18 +450,30 @@ func (d *Daemon) statusResponse() ipc.Response {
 	for i, s := range d.sources {
 		srcNames[i] = s.Name()
 	}
+	if d.lookup != nil {
+		srcNames = d.lookup.Names()
+	}
+	complete := true
+	var reasons []string
+	if d.lastSources != nil {
+		complete, reasons = d.lastSources.Complete, d.lastSources.IncompleteReasons
+	}
 	return ipc.Response{OK: true, Data: map[string]any{
-		"version":    Version,
-		"started_at": d.startedAt,
-		"last_scan":  d.lastScan,
-		"last_sync":  d.lastSync,
-		"findings":   len(d.lastFinds),
-		"last_pdf":   d.lastPDF,
-		"last_json":  d.lastJSON,
-		"sources":    srcNames,
-		"socket":     d.cfg.IPC.Socket,
-		"report_dir": d.cfg.Report.Dir,
-		"running":    d.snapshotJobs(),
+		"feed_mode":          d.cfg.FeedMode(),
+		"cve_data_complete":  complete,
+		"incomplete_reasons": reasons,
+		"notify":             d.notifier != nil,
+		"version":            Version,
+		"started_at":         d.startedAt,
+		"last_scan":          d.lastScan,
+		"last_sync":          d.lastSync,
+		"findings":           len(d.lastFinds),
+		"last_pdf":           d.lastPDF,
+		"last_json":          d.lastJSON,
+		"sources":            srcNames,
+		"socket":             d.cfg.IPC.Socket,
+		"report_dir":         d.cfg.Report.Dir,
+		"running":            d.snapshotJobs(),
 	}}
 }
 
@@ -449,11 +496,15 @@ func (d *Daemon) handleScan(req ipc.Request) ipc.Response {
 	}}
 }
 
-func buildApplicabilityEngine(cfg config.ApplicabilityConfig, feedCacheDir string, store *feed.Store, log *slog.Logger) *applicability.Engine {
+func buildApplicabilityEngine(cfg config.ApplicabilityConfig, feedCacheDir string, store *feed.Store, lk *lookup.Client, log *slog.Logger) *applicability.Engine {
 	rhCacheDir := filepath.Join(feedCacheDir, "redhat", "details")
 	ubCacheDir := filepath.Join(feedCacheDir, "ubuntu", "details")
+	rh := applicability.NewRedHatJudge(rhCacheDir)
+	if lk != nil {
+		rh = applicability.NewRedHatJudgeWith(lk.Details) // same cache + TTL as the lookups
+	}
 	judges := []applicability.Judge{
-		applicability.NewRedHatJudge(rhCacheDir),
+		rh,
 		applicability.NewDebianJudge(store),
 		applicability.NewUbuntuJudge(ubCacheDir),
 		applicability.NewSUSEJudge(),

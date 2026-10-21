@@ -31,8 +31,13 @@ func (d *Daemon) RunOnce(ctx context.Context, cveID string, out io.Writer) (*Onc
 	for i, s := range d.sources {
 		names[i] = s.Name()
 	}
-	audit.Log("FEEDS", "active sources: %s (cache %s)", strings.Join(names, ","), d.cfg.Feed.CacheDir)
-	d.maybeInitialSync(ctx)
+	if d.lookup != nil {
+		names = d.lookup.Names()
+	}
+	audit.Log("FEEDS", "mode=%s active sources: %s (cache %s)", d.cfg.FeedMode(), strings.Join(names, ","), d.cfg.Feed.CacheDir)
+	if d.lookup == nil {
+		d.maybeInitialSync(ctx)
+	}
 	if ctx.Err() != nil {
 		return res, ctx.Err()
 	}
@@ -49,6 +54,9 @@ func (d *Daemon) RunOnce(ctx context.Context, cveID string, out io.Writer) (*Onc
 			return res, err
 		}
 		res.Verdict = cr.Verdict
+		if cr.Sources != nil {
+			res.FailedSources = append(res.FailedSources, cr.Sources.FailedSources()...)
+		}
 		audit.Log("CVE", "%s verdict=%s known_by=%v installed_candidates=%d findings=%d reason=%q",
 			cr.CVE, cr.Verdict, cr.KnownBy, len(cr.Installed), len(cr.Findings), cr.Reason)
 		return res, enc.Encode(cr)
@@ -60,6 +68,12 @@ func (d *Daemon) RunOnce(ctx context.Context, cveID string, out io.Writer) (*Onc
 	d.mu.Lock()
 	jsonPath := d.lastJSON
 	res.Findings = len(d.lastFinds)
+	if d.lookup != nil && d.lastSources != nil {
+		res.FailedSources = append(res.FailedSources, d.lastSources.FailedSources()...)
+		if len(res.FailedSources) == 0 && !d.lastSources.Complete && len(d.lastSources.Sources) > 0 {
+			res.FailedSources = append(res.FailedSources, "lookup")
+		}
+	}
 	d.mu.Unlock()
 	if jsonPath == "" {
 		return res, fmt.Errorf("scan finished without a report")

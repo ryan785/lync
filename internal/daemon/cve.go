@@ -36,6 +36,7 @@ type CVECheck struct {
 	Installed  []CVEInstalledPkg `json:"installed,omitempty"`  // installed packages a feed names
 	Findings   []finding.Finding `json:"findings,omitempty"`   // after applicability filtering
 	Suppressed int               `json:"suppressed,omitempty"` // findings dropped by distro judges
+	Sources    *feed.ScanSources `json:"sources,omitempty"`    // lookups queried (lookup mode)
 }
 
 type CVEInstalledPkg struct {
@@ -58,6 +59,20 @@ func (d *Daemon) CheckCVE(ctx context.Context, id string) (*CVECheck, error) {
 	facts, err := collector.Collect(ctx, d.log)
 	if err != nil {
 		return nil, err
+	}
+
+	if d.lookup != nil {
+		vulns, src := d.lookup.CVE(ctx, facts, id)
+		res := evaluateCVE(ctx, d, facts, id, vulns)
+		res.Sources = &src
+		if !src.Complete {
+			if len(vulns) == 0 {
+				res.Reason = "lookups failed, verdict unknown: " + strings.Join(src.IncompleteReasons, "; ")
+			} else {
+				res.Reason += " (some lookups failed: " + strings.Join(src.IncompleteReasons, "; ") + ")"
+			}
+		}
+		return res, nil
 	}
 
 	var vulns []feed.Vulnerability
@@ -112,7 +127,7 @@ func evaluateCVE(ctx context.Context, d *Daemon, facts *collector.Facts, id stri
 		res.Reason = fmt.Sprintf("%d finding(s); see findings[].remediation", len(kept))
 	case len(vulns) == 0:
 		res.Verdict = VerdictUnknownToFeeds
-		res.Reason = "no cached feed has data for this CVE yet - run `lync sync` and retry; vendors may not have published"
+		res.Reason = "no feed has data for this CVE yet - vendors may not have published (full mode: run `lync sync` and retry)"
 	case noFixYet:
 		res.Verdict = VerdictNoFixYet
 		res.Reason = "an installed package is named by a feed but no fixed version is published yet"
