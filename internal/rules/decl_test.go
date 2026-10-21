@@ -116,6 +116,13 @@ func vectorHost(t *testing.T, base, v *Vector) (*Host, *collector.Facts) {
 	}
 	for p, body := range files {
 		write(p, body)
+		// Fixture files are root-owned 0644 unless a vector says otherwise,
+		// so results don't depend on the uid running the tests.
+		if !strings.HasSuffix(p, "/") {
+			if _, ok := metas[p]; !ok {
+				h.Meta[p] = FileMeta{Mode: 0o644, UID: 0, GID: 0, HasOwner: true}
+			}
+		}
 	}
 	for p, target := range links {
 		if _, ok := files[p]; !ok {
