@@ -1,0 +1,313 @@
+pack: php
+title: PHP runtime configuration (php.ini)
+description: Security-relevant php.ini directives, evaluated per PHP installation (system php.ini + php.d, Remi SCL, Debian/Ubuntu per-version fpm/apache2/cgi, Alpine). Unset keys use PHP's compiled-in default, not php.ini-production. Several directives are also covered by the original php rule (expose_php, display_errors, allow_url_include, disable_functions, upload progress).
+category: config
+applies_if:
+  file: [/etc/php.ini, /etc/php/*/*/php.ini, /etc/opt/remi/php*/php.ini, /etc/php*/php.ini]
+references:
+  - https://www.php.net/manual/en/ini.list.php
+test_base:
+  os: debian:12
+  packages: {php8.2-fpm: "8.2.20-1~deb12u1"}
+  files:
+    /etc/php/8.2/fpm/php.ini: "[PHP]\nengine = On\n"
+checks:
+  - id: php:session-cookie-httponly
+    title: PHP session cookie readable by JavaScript (session.cookie_httponly off)
+    description: Without HttpOnly any XSS bug can read the session cookie and hijack the session.
+    severity: medium
+    probe: {type: config, format: php, key: session.cookie_httponly, default: "0"}
+    expect: ["value in 1,on,true,yes"]
+    remediation: Set session.cookie_httponly = 1.
+    references: [https://www.php.net/manual/en/session.configuration.php#ini.session.cookie-httponly]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/conf.d/99-session.ini: "session.cookie_httponly = 1\n"}}
+      fail: {}
+      na: {files: {/etc/php/8.2/fpm/php.ini: "!absent"}}
+
+  - id: php:session-cookie-secure
+    title: PHP session cookie sent over plain HTTP (session.cookie_secure off)
+    description: Without the Secure flag the session cookie is sent on any http:// request and can be sniffed. Enable it on HTTPS-only sites.
+    severity: low
+    level: strict
+    probe: {type: config, format: php, key: session.cookie_secure, default: "0"}
+    expect: ["value in 1,on,true,yes"]
+    remediation: Set session.cookie_secure = 1 once the site is HTTPS-only.
+    references: [https://www.php.net/manual/en/session.configuration.php#ini.session.cookie-secure]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "[Session]\nsession.cookie_secure = On\n"}}
+      fail: {}
+
+  - id: php:session-use-strict-mode
+    title: PHP accepts uninitialised session IDs (session.use_strict_mode off)
+    description: Without strict mode PHP adopts any session ID a client presents, which enables session fixation attacks.
+    severity: medium
+    probe: {type: config, format: php, key: session.use_strict_mode, default: "0"}
+    expect: ["value in 1,on,true,yes"]
+    remediation: Set session.use_strict_mode = 1.
+    references: [https://www.php.net/manual/en/session.configuration.php#ini.session.use-strict-mode, https://owasp.org/www-community/attacks/Session_fixation]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "session.use_strict_mode = 1\n"}}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "session.use_strict_mode = 0\n"}}
+
+  - id: php:session-use-only-cookies
+    title: PHP accepts session IDs from URLs (session.use_only_cookies off)
+    description: Session IDs in URLs leak through Referer headers, logs and shared links, enabling session hijacking and fixation.
+    severity: medium
+    probe: {type: config, format: php, key: session.use_only_cookies, default: "1"}
+    expect: ["value in 1,on,true,yes"]
+    remediation: Set session.use_only_cookies = 1 (the default).
+    references: [https://www.php.net/manual/en/session.configuration.php#ini.session.use-only-cookies]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "session.use_only_cookies = 0\n"}}
+
+  - id: php:session-use-trans-sid
+    title: PHP rewrites URLs to carry the session ID (session.use_trans_sid on)
+    description: Transparent SID support embeds the session ID in links and forms, leaking it through Referer headers and logs.
+    severity: medium
+    probe: {type: config, format: php, key: session.use_trans_sid, default: "0"}
+    expect: ["value not_in 1,on,true,yes"]
+    remediation: Set session.use_trans_sid = 0 (the default).
+    references: [https://www.php.net/manual/en/session.configuration.php#ini.session.use-trans-sid]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "session.use_trans_sid = 1\n"}}
+
+  - id: php:session-use-cookies
+    title: PHP sessions do not use cookies (session.use_cookies off)
+    description: With cookies off the session ID has to travel in URLs, where it leaks.
+    severity: medium
+    probe: {type: config, format: php, key: session.use_cookies, default: "1"}
+    expect: ["value in 1,on,true,yes"]
+    remediation: Set session.use_cookies = 1 (the default).
+    references: [https://www.php.net/manual/en/session.configuration.php#ini.session.use-cookies]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "session.use_cookies = Off\n"}}
+
+  - id: php:session-cookie-samesite
+    title: PHP session cookie has no SameSite attribute
+    description: SameSite=Lax or Strict stops browsers from attaching the session cookie to cross-site requests, a strong CSRF mitigation.
+    severity: low
+    level: strict
+    probe: {type: config, format: php, key: session.cookie_samesite, default: ""}
+    expect: ["value in lax,strict"]
+    remediation: Set session.cookie_samesite = Lax (or Strict if the application allows it).
+    references: [https://www.php.net/manual/en/session.configuration.php#ini.session.cookie-samesite]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "session.cookie_samesite = \"Lax\"\n"}}
+      fail: {}
+
+  - id: php:allow-url-fopen
+    title: PHP can open remote URLs as files (allow_url_fopen on)
+    description: allow_url_fopen lets file functions fetch http:// and ftp:// URLs, widening SSRF and remote-content injection when paths are attacker-influenced.
+    severity: low
+    level: strict
+    probe: {type: config, format: php, key: allow_url_fopen, default: "1"}
+    expect: ["value not_in 1,on,true,yes"]
+    remediation: Set allow_url_fopen = Off if the applications use curl or HTTP clients instead.
+    references: [https://www.php.net/manual/en/filesystem.configuration.php#ini.allow-url-fopen]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "allow_url_fopen = Off\n"}}
+      fail: {}
+
+  - id: php:open-basedir-unset
+    title: PHP file access not confined (open_basedir unset)
+    description: open_basedir limits which directories PHP code can open; without it a webshell or LFI bug can read any file the PHP user can.
+    severity: low
+    level: strict
+    probe: {type: config, format: php, key: open_basedir, default: ""}
+    expect: [value not_empty]
+    remediation: Set open_basedir per site (php_admin_value[open_basedir] in the FPM pool) to the application and temp directories.
+    references: [https://www.php.net/manual/en/ini.core.php#ini.open-basedir]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "open_basedir = /var/www:/tmp\n"}}
+      fail: {}
+
+  - id: php:log-errors-off
+    title: PHP does not log errors (log_errors off)
+    description: With log_errors off, PHP errors (including those caused by exploitation attempts) leave no trace.
+    severity: low
+    probe: {type: config, format: php, key: log_errors, default: "1"}
+    expect: ["value in 1,on,true,yes"]
+    remediation: Set log_errors = On.
+    references: [https://www.php.net/manual/en/errorfunc.configuration.php#ini.log-errors]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "log_errors = Off\n"}}
+
+  - id: php:display-startup-errors
+    title: PHP displays startup errors (display_startup_errors on)
+    description: Startup errors expose paths and extension details to clients. The compiled-in default is On since PHP 8.0, so installs without php.ini-production show them.
+    severity: low
+    probe: {type: config, format: php, key: display_startup_errors, default: "1"}
+    expect: ["value not_in 1,on,true,yes"]
+    remediation: Set display_startup_errors = Off.
+    references: [https://www.php.net/manual/en/errorfunc.configuration.php#ini.display-startup-errors]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "display_startup_errors = Off\n"}}
+      fail: {}
+
+  - id: php:mail-add-x-header
+    title: PHP mail() adds X-PHP-Originating-Script headers
+    description: mail.add_x_header discloses the script path and UID in every outgoing mail.
+    severity: low
+    level: strict
+    probe: {type: config, format: php, key: mail.add_x_header, default: "0"}
+    expect: ["value not_in 1,on,true,yes"]
+    remediation: Set mail.add_x_header = Off.
+    references: [https://www.php.net/manual/en/mail.configuration.php#ini.mail.add-x-header]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "mail.add_x_header = On\n"}}
+
+  - id: php:zend-assertions
+    title: PHP assertions are compiled and executed (zend.assertions not -1)
+    description: Development assertions run in production, costing performance and sometimes exposing internal state; production should compile them out.
+    severity: low
+    level: strict
+    probe: {type: config, format: php, key: zend.assertions, default: "1"}
+    expect: [value eq -1]
+    remediation: Set zend.assertions = -1.
+    references: [https://www.php.net/manual/en/ini.core.php#ini.zend.assertions]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "zend.assertions = -1\n"}}
+      fail: {}
+
+  - id: php:register-argc-argv
+    title: PHP registers $argc/$argv for web requests (register_argc_argv on)
+    description: With register_argc_argv on, the query string becomes $argv for web requests; this is what turns a local file inclusion of pearcmd.php into remote code execution.
+    severity: low
+    probe: {type: config, format: php, key: register_argc_argv, default: "1"}
+    expect: ["value not_in 1,on,true,yes"]
+    remediation: Set register_argc_argv = Off (the CLI always gets argv regardless).
+    references: [https://www.php.net/manual/en/ini.core.php#ini.register-argc-argv]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "register_argc_argv = Off\n"}}
+      fail: {}
+
+  - id: php:exception-ignore-args
+    title: PHP stack traces include function arguments
+    description: With zend.exception_ignore_args off, exception traces (often logged or displayed) contain argument values such as passwords and tokens.
+    severity: low
+    level: strict
+    probe: {type: config, format: php, key: zend.exception_ignore_args, default: "0"}
+    expect: ["value in 1,on,true,yes"]
+    remediation: Set zend.exception_ignore_args = On.
+    references: [https://www.php.net/manual/en/ini.core.php#ini.zend.exception-ignore-args]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "zend.exception_ignore_args = On\n"}}
+      fail: {}
+
+  - id: php:memory-limit-unlimited
+    title: PHP memory_limit is unlimited
+    description: memory_limit = -1 lets a single request consume all memory, an easy denial of service.
+    severity: low
+    probe: {type: config, format: php, key: memory_limit, default: 128M}
+    expect: [value ne -1]
+    remediation: Set memory_limit to what the application needs (e.g. 256M).
+    references: [https://www.php.net/manual/en/ini.core.php#ini.memory-limit]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "memory_limit = -1\n"}}
+
+  - id: php:phar-readonly-off
+    title: PHP scripts can create PHAR archives (phar.readonly off)
+    description: phar.readonly Off lets any script write PHAR archives, a building block for PHAR deserialization attacks and persistence.
+    severity: low
+    probe: {type: config, format: php, key: phar.readonly, default: "1"}
+    expect: ["value in 1,on,true,yes"]
+    remediation: Set phar.readonly = On (the default).
+    references: [https://www.php.net/manual/en/phar.configuration.php#ini.phar.readonly]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "phar.readonly = Off\n"}}
+
+  - id: php:ffi-enabled
+    title: PHP FFI enabled for all scripts
+    description: ffi.enable = On lets any PHP script call arbitrary C functions, so a webshell gets native code execution and bypasses disable_functions.
+    severity: medium
+    probe: {type: config, format: php, key: ffi.enable, default: preload}
+    expect: ["value in preload,0,off,false,no"]
+    remediation: Set ffi.enable = preload (the default) or Off.
+    references: [https://www.php.net/manual/en/ffi.configuration.php]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/php.ini: "ffi.enable = On\n"}}
+
+  - id: php:xdebug-loaded
+    title: Xdebug extension loaded in a server PHP installation
+    description: Xdebug is a development debugger; in production it slows every request and, with remote debugging enabled, can give remote code execution.
+    severity: medium
+    probe:
+      type: content
+      path: [/etc/php.d/*xdebug*.ini, /etc/php/*/fpm/conf.d/*xdebug*.ini, /etc/php/*/apache2/conf.d/*xdebug*.ini, /etc/opt/remi/php*/php.d/*xdebug*.ini, /etc/php*/conf.d/*xdebug*.ini]
+      regex: '^\s*zend_extension\s*=.*xdebug'
+    expect: [match eq false]
+    remediation: Remove the Xdebug package (php-xdebug / phpX.Y-xdebug) from production servers.
+    references: [https://xdebug.org/docs/install]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/conf.d/20-xdebug.ini: ";zend_extension=xdebug.so\n"}}
+      fail: {files: {/etc/php/8.2/fpm/conf.d/20-xdebug.ini: "zend_extension=xdebug.so\n"}}
+
+  - id: php:xdebug-discover-client-host
+    title: Xdebug connects back to any client (xdebug.discover_client_host)
+    description: With discover_client_host on, any visitor can make the server open a debugger session to the visitor's host and evaluate arbitrary code.
+    severity: high
+    probe: {type: config, format: php, key: xdebug.discover_client_host, default: "0"}
+    expect: ["value not_in 1,on,true,yes"]
+    remediation: Remove Xdebug from production, or set xdebug.discover_client_host = 0 with a fixed xdebug.client_host.
+    references: [https://xdebug.org/docs/all_settings#discover_client_host]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/conf.d/20-xdebug.ini: "zend_extension=xdebug.so\nxdebug.mode = debug\nxdebug.discover_client_host = 1\n"}}
+
+  - id: php:xdebug-remote-connect-back
+    title: Xdebug 2 connects back to any client (xdebug.remote_connect_back)
+    description: Xdebug 2's remote_connect_back lets any visitor start a debugging session against the server and evaluate arbitrary code.
+    severity: high
+    probe: {type: config, format: php, key: xdebug.remote_connect_back, default: "0"}
+    expect: ["value not_in 1,on,true,yes"]
+    remediation: Remove Xdebug from production, or disable xdebug.remote_connect_back.
+    references: [https://2.xdebug.org/docs/all_settings#remote_connect_back]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/conf.d/20-xdebug.ini: "xdebug.remote_enable = 1\nxdebug.remote_connect_back = 1\n"}}
+
+  - id: php:auto-prepend-tmp
+    title: PHP auto_prepend_file points into a world-writable temp directory
+    description: auto_prepend_file runs before every script; pointing it at /tmp, /var/tmp or /dev/shm lets any local user inject code into every request, and is a common persistence trick.
+    severity: high
+    probe: {type: config, format: php, key: auto_prepend_file, default: ""}
+    expect: ['value not_regex ^/(tmp|var/tmp|dev/shm)/']
+    remediation: Remove auto_prepend_file or point it at a root-owned file; investigate who set it.
+    references: [https://www.php.net/manual/en/ini.core.php#ini.auto-prepend-file]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/conf.d/99-x.ini: "auto_prepend_file = /tmp/.p.php\n"}}
+
+  - id: php:auto-append-tmp
+    title: PHP auto_append_file points into a world-writable temp directory
+    description: auto_append_file runs after every script; pointing it at /tmp, /var/tmp or /dev/shm lets any local user inject code into every request.
+    severity: high
+    probe: {type: config, format: php, key: auto_append_file, default: ""}
+    expect: ['value not_regex ^/(tmp|var/tmp|dev/shm)/']
+    remediation: Remove auto_append_file or point it at a root-owned file; investigate who set it.
+    references: [https://www.php.net/manual/en/ini.core.php#ini.auto-append-file]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php/8.2/fpm/conf.d/99-x.ini: "auto_append_file = /dev/shm/a.php\n"}}
+
+  - id: php:user-ini-enabled
+    title: PHP honours per-directory .user.ini files
+    description: With user_ini.filename set (default .user.ini), anyone able to upload a .user.ini into a web directory can set auto_prepend_file and execute code.
+    severity: low
+    level: strict
+    probe: {type: config, format: php, key: user_ini.filename, default: .user.ini}
+    expect: [value empty]
+    remediation: Set user_ini.filename = (empty) unless per-directory settings are needed.
+    references: [https://www.php.net/manual/en/configuration.file.per-user.php]
+    tests:
+      pass: {files: {/etc/php/8.2/fpm/php.ini: "user_ini.filename =\n"}}
+      fail: {}

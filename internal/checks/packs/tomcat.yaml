@@ -1,0 +1,224 @@
+pack: tomcat
+title: Apache Tomcat
+description: Tomcat configuration (server.xml, tomcat-users.xml, web.xml), deployed management/example applications and the AJP connector, for distribution packages (/etc/tomcat*, /var/lib/tomcat*) and tarball installs (/opt/tomcat*, /opt/apache-tomcat*, /usr/local/tomcat*).
+category: config
+applies_if:
+  any:
+    - package: [tomcat, tomcat9, tomcat10, tomcat8, tomcat-webapps]
+    - file: [/etc/tomcat*/server.xml, /opt/tomcat*/conf/server.xml, /opt/apache-tomcat*/conf/server.xml, /usr/local/tomcat*/conf/server.xml]
+references:
+  - https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html
+test_base:
+  os: debian:12
+  packages: {tomcat9: "9.0.70-2"}
+  files:
+    /etc/tomcat9/server.xml: |
+      <?xml version="1.0" encoding="UTF-8"?>
+      <Server port="-1" shutdown="SHUTDOWN">
+        <Service name="Catalina">
+          <Connector port="8080" protocol="HTTP/1.1" connectionTimeout="20000" redirectPort="8443" />
+        </Service>
+      </Server>
+    /etc/tomcat9/tomcat-users.xml: |
+      <tomcat-users>
+      <!--
+        <user username="admin" password="<must-be-changed>" roles="manager-gui"/>
+      -->
+      </tomcat-users>
+checks:
+  - id: tomcat:default-credentials
+    title: Tomcat user with a default or well-known password
+    description: tomcat-users.xml defines an account whose password is a well-known default (tomcat, admin, s3cret, password...). With the manager application deployed that is remote code execution by WAR upload.
+    severity: critical
+    level: basic
+    probe:
+      type: content
+      secret: true
+      path: [/etc/tomcat*/tomcat-users.xml, /opt/tomcat*/conf/tomcat-users.xml, /opt/apache-tomcat*/conf/tomcat-users.xml, /usr/local/tomcat*/conf/tomcat-users.xml]
+      regex: '^\s*<user\s[^>]*password\s*=\s*"(tomcat|admin|s3cret|secret|password|manager|changeme|role1|both|123456|tomcat123|admin123)"'
+    expect: [match eq false]
+    evidence: "{path}:{lineno}: <user> entry with a well-known password (value not shown)"
+    remediation: Set strong unique passwords (or remove the users) and restart Tomcat; check the manager logs for unexpected deployments.
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/manager-howto.html#Configuring_Manager_Application_Access]
+    tests:
+      pass: {}
+      fail: {files: {/etc/tomcat9/tomcat-users.xml: "<tomcat-users>\n  <user username=\"tomcat\" password=\"s3cret\" roles=\"manager-gui\"/>\n</tomcat-users>\n"}}
+      na: {packages: {tomcat9: "!absent"}, files: {/etc/tomcat9/server.xml: "!absent"}}
+
+  - id: tomcat:users-world-readable
+    title: "Tomcat tomcat-users.xml readable by any user: {path}"
+    description: tomcat-users.xml stores manager credentials, often in clear text.
+    severity: high
+    probe: {type: file, path: [/etc/tomcat*/tomcat-users.xml, /opt/tomcat*/conf/tomcat-users.xml, /opt/apache-tomcat*/conf/tomcat-users.xml, /usr/local/tomcat*/conf/tomcat-users.xml]}
+    expect: [mode bits_none 0004]
+    remediation: chmod 640 tomcat-users.xml (group tomcat).
+    fix: chmod 640 {path}
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html#Non-Tomcat_settings]
+    tests:
+      pass: {meta: {/etc/tomcat9/tomcat-users.xml: "0640 0 997"}}
+      fail: {meta: {/etc/tomcat9/tomcat-users.xml: "0644 0 0"}}
+
+  - id: tomcat:admin-apps-deployed
+    title: "Tomcat manager or host-manager application deployed: {path}"
+    description: The manager applications deploy arbitrary code; they are the first target of Tomcat attacks and should not exist on production servers unless strictly needed and restricted.
+    severity: medium
+    probe:
+      type: file
+      path: [/var/lib/tomcat*/webapps/manager, /var/lib/tomcat*/webapps/host-manager, /opt/tomcat*/webapps/manager, /opt/tomcat*/webapps/host-manager, /opt/apache-tomcat*/webapps/manager, /opt/apache-tomcat*/webapps/host-manager, /usr/local/tomcat*/webapps/manager, /usr/local/tomcat*/webapps/host-manager, /etc/tomcat*/Catalina/localhost/manager.xml, /etc/tomcat*/Catalina/localhost/host-manager.xml]
+    expect_none: true
+    remediation: Remove the manager/host-manager webapps (or the tomcatN-admin package) unless required; if required, keep the RemoteAddrValve and use strong credentials.
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html#Manager]
+    tests:
+      pass: {}
+      fail: {files: {/etc/tomcat9/Catalina/localhost/manager.xml: "<Context docBase=\"/usr/share/tomcat9-admin/manager\"/>\n"}}
+
+  - id: tomcat:manager-no-remote-addr
+    title: "Tomcat manager is not restricted to localhost: {path}"
+    description: The manager's META-INF/context.xml ships a RemoteAddrValve allowing only 127.0.0.1/::1; when it is removed or commented out the manager login is reachable from the network.
+    severity: high
+    probe:
+      type: content
+      path: [/var/lib/tomcat*/webapps/manager/META-INF/context.xml, /opt/tomcat*/webapps/manager/META-INF/context.xml, /opt/apache-tomcat*/webapps/manager/META-INF/context.xml, /usr/local/tomcat*/webapps/manager/META-INF/context.xml, /usr/share/tomcat*-admin/manager/META-INF/context.xml]
+      regex: '(<Context[^>]*>|-->|/>|</[A-Za-z]+>)\s*<Valve\s+className="org\.apache\.catalina\.valves\.RemoteAddr(Valve|Filter)"'
+    expect: [match eq true]
+    evidence: "{path}: no active RemoteAddrValve"
+    remediation: Restore the RemoteAddrValve (allow only localhost or an admin network) in the manager's context.xml.
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/manager-howto.html#Configuring_Manager_Application_Access]
+    tests:
+      pass: {files: {/var/lib/tomcat9/webapps/manager/META-INF/context.xml: "<Context>\n  <Valve className=\"org.apache.catalina.valves.RemoteAddrValve\" allow=\"127\\.\\d+\\.\\d+\\.\\d+|::1\" />\n</Context>\n"}}
+      fail: {files: {/var/lib/tomcat9/webapps/manager/META-INF/context.xml: "<Context>\n<!--\n  <Valve className=\"org.apache.catalina.valves.RemoteAddrValve\" allow=\"127.0.0.1\" />\n-->\n  <Manager sessionAttributeValueClassNameFilter=\"java.lang.String\"/>\n</Context>\n"}}
+
+  - id: tomcat:examples-deployed
+    title: "Tomcat examples application deployed: {path}"
+    description: The examples webapp includes servlets that manipulate sessions and echo input, useful to attackers (session fixation, XSS) and never needed in production.
+    severity: medium
+    probe:
+      type: file
+      path: [/var/lib/tomcat*/webapps/examples, /opt/tomcat*/webapps/examples, /opt/apache-tomcat*/webapps/examples, /usr/local/tomcat*/webapps/examples, /etc/tomcat*/Catalina/localhost/examples.xml]
+    expect_none: true
+    remediation: Remove the examples webapp (or the tomcatN-examples package).
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html#Default_web_applications]
+    tests:
+      pass: {}
+      fail: {files: {/opt/tomcat/webapps/examples/index.html: "x\n", /opt/tomcat/conf/server.xml: "<Server port=\"-1\"/>\n"}}
+
+  - id: tomcat:shutdown-port
+    title: Tomcat shutdown port enabled with the default command
+    description: Any local user can stop Tomcat by sending SHUTDOWN to the shutdown port (8005).
+    severity: low
+    probe:
+      type: content
+      path: [/etc/tomcat*/server.xml, /opt/tomcat*/conf/server.xml, /opt/apache-tomcat*/conf/server.xml, /usr/local/tomcat*/conf/server.xml]
+      regex: '<Server\s[^>]*(port="[1-9][0-9]*"[^>]*shutdown="SHUTDOWN"|shutdown="SHUTDOWN"[^>]*port="[1-9][0-9]*")'
+    expect: [match eq false]
+    evidence: "{path}:{lineno}: shutdown port enabled with command SHUTDOWN"
+    remediation: Set port="-1" on <Server> (stop Tomcat with systemd) or at least change the shutdown string.
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html#Server]
+    tests:
+      pass: {}
+      fail: {files: {/etc/tomcat9/server.xml: "<Server port=\"8005\" shutdown=\"SHUTDOWN\">\n</Server>\n"}}
+
+  - id: tomcat:ajp-secret-disabled
+    title: Tomcat AJP connector accepts requests without a secret (Ghostcat)
+    description: An AJP connector with secretRequired="false" lets anyone who reaches it read any file in the webapps and include it as JSP (CVE-2020-1938).
+    severity: high
+    probe:
+      type: content
+      path: [/etc/tomcat*/server.xml, /opt/tomcat*/conf/server.xml, /opt/apache-tomcat*/conf/server.xml, /usr/local/tomcat*/conf/server.xml]
+      regex: '<Connector\s[^>]*AJP[^>]*secretRequired="false"'
+    expect: [match eq false]
+    evidence: "{path}:{lineno}: AJP connector with secretRequired=false"
+    remediation: Remove the AJP connector if unused; otherwise set a secret and bind it to 127.0.0.1.
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2020-1938, https://tomcat.apache.org/tomcat-9.0-doc/config/ajp.html]
+    tests:
+      pass: {}
+      fail: {files: {/etc/tomcat9/server.xml: "<Server port=\"-1\">\n  <Connector protocol=\"AJP/1.3\" address=\"127.0.0.1\" port=\"8009\" secretRequired=\"false\" />\n</Server>\n"}}
+
+  - id: tomcat:ajp-exposed
+    title: Tomcat AJP port reachable from the network
+    description: AJP (8009) trusts the front-end proxy completely; exposed to the network it allows file disclosure and, combined with uploads, code execution (Ghostcat).
+    severity: high
+    probe: {type: listener, ports: [8009], proto: tcp}
+    expect: [loopback eq true]
+    remediation: Bind the AJP connector to 127.0.0.1 (address="127.0.0.1"), remove it if unused, and firewall 8009.
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2020-1938]
+    tests:
+      pass: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 100 127.0.0.1:8009 0.0.0.0:* users:((\"java\",pid=10,fd=50))\n"}}
+      fail: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 100 0.0.0.0:8009 0.0.0.0:* users:((\"java\",pid=10,fd=50))\n"}}
+
+  - id: tomcat:directory-listings
+    title: Tomcat DefaultServlet directory listings enabled
+    description: listings=true in conf/web.xml lists every file of every webapp directory without an index page.
+    severity: medium
+    probe:
+      type: content
+      path: [/etc/tomcat*/web.xml, /opt/tomcat*/conf/web.xml, /opt/apache-tomcat*/conf/web.xml, /usr/local/tomcat*/conf/web.xml]
+      regex: '<param-name>\s*listings\s*</param-name>\s*<param-value>\s*true'
+    expect: [match eq false]
+    remediation: Set the DefaultServlet listings init-param to false.
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/default-servlet.html]
+    tests:
+      pass: {files: {/etc/tomcat9/web.xml: "<init-param>\n  <param-name>listings</param-name>\n  <param-value>false</param-value>\n</init-param>\n"}}
+      fail: {files: {/etc/tomcat9/web.xml: "<init-param>\n  <param-name>listings</param-name>\n  <param-value>true</param-value>\n</init-param>\n"}}
+
+  - id: tomcat:xpoweredby
+    title: Tomcat advertises itself in X-Powered-By
+    description: xpoweredBy="true" on a connector adds X-Powered-By headers with the Servlet/JSP and Tomcat versions.
+    severity: low
+    probe:
+      type: content
+      path: [/etc/tomcat*/server.xml, /opt/tomcat*/conf/server.xml, /opt/apache-tomcat*/conf/server.xml, /usr/local/tomcat*/conf/server.xml]
+      regex: 'xpoweredBy="true"'
+    expect: [match eq false]
+    remediation: Remove xpoweredBy="true" from the connectors.
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/config/http.html]
+    tests:
+      pass: {}
+      fail: {files: {/etc/tomcat9/server.xml: "<Server port=\"-1\">\n  <Connector port=\"8080\" xpoweredBy=\"true\"/>\n</Server>\n"}}
+
+  - id: tomcat:runs-as-root
+    title: Tomcat service runs as root
+    description: The tomcat systemd unit has no User= (or User=root), so a single deserialisation or upload bug in any webapp gives root.
+    severity: high
+    probe: {type: systemd, name: [tomcat, tomcat9, tomcat10], properties: [User]}
+    expect: [User not_empty, User ne root]
+    remediation: Run Tomcat as a dedicated tomcat user (User=tomcat in the unit or a drop-in) and fix file ownership.
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html#Non-Tomcat_settings]
+    tests:
+      pass:
+        cmds:
+          "systemctl show tomcat --property=LoadState,ActiveState,UnitFileState,User": "LoadState=not-found\nUser=\n"
+          "systemctl show tomcat9 --property=LoadState,ActiveState,UnitFileState,User": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\nUser=tomcat\n"
+          "systemctl show tomcat10 --property=LoadState,ActiveState,UnitFileState,User": "LoadState=not-found\nUser=\n"
+      fail:
+        cmds:
+          "systemctl show tomcat --property=LoadState,ActiveState,UnitFileState,User": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\nUser=\n"
+          "systemctl show tomcat9 --property=LoadState,ActiveState,UnitFileState,User": "LoadState=not-found\nUser=\n"
+          "systemctl show tomcat10 --property=LoadState,ActiveState,UnitFileState,User": "LoadState=not-found\nUser=\n"
+      skip: {}
+
+  - id: tomcat:conf-world-writable
+    title: "Tomcat configuration writable by any user: {path}"
+    description: Anyone who can edit server.xml, web.xml or context.xml can add connectors, valves or JNDI resources that run code in Tomcat.
+    severity: high
+    probe: {type: file, path: [/etc/tomcat*/server.xml, /etc/tomcat*/web.xml, /etc/tomcat*/context.xml, /etc/tomcat*/tomcat-users.xml, /opt/tomcat*/conf/*.xml, /opt/apache-tomcat*/conf/*.xml, /usr/local/tomcat*/conf/*.xml]}
+    expect: [mode bits_none 0002]
+    remediation: Remove world write permission.
+    fix: chmod o-w {path}
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html#Non-Tomcat_settings]
+    tests:
+      pass: {meta: {/etc/tomcat9/server.xml: "0640 0 997"}}
+      fail: {meta: {/etc/tomcat9/server.xml: "0666 0 997"}}
+
+  - id: tomcat:webapps-world-writable
+    title: "Tomcat webapps directory writable by any user: {path}"
+    description: With autoDeploy (the default) any local user who can drop a WAR into webapps gets code execution as the Tomcat user.
+    severity: high
+    probe: {type: file, path: [/var/lib/tomcat*/webapps, /opt/tomcat*/webapps, /opt/apache-tomcat*/webapps, /usr/local/tomcat*/webapps]}
+    expect: [mode bits_none 0002]
+    remediation: Remove world write permission and keep webapps owned by root or a deploy user.
+    fix: chmod o-w {path}
+    references: [https://tomcat.apache.org/tomcat-9.0-doc/config/host.html#Automatic_Application_Deployment]
+    tests:
+      pass: {meta: {/var/lib/tomcat9/webapps: "d0775 997 997"}}
+      fail: {meta: {/var/lib/tomcat9/webapps: "d0777 997 997"}}

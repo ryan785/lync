@@ -1,0 +1,268 @@
+pack: apache
+title: Apache httpd
+description: Apache httpd configuration and file permissions beyond the original web-server rule (ServerTokens/Signature, TraceEnable, Indexes and SSLProtocol are checked there).
+category: config
+applies_if:
+  any:
+    - package: [httpd, apache2]
+    - file: [/etc/httpd/conf/httpd.conf, /etc/apache2/apache2.conf]
+references:
+  - https://httpd.apache.org/docs/2.4/misc/security_tips.html
+test_base:
+  os: rocky:9.4
+  packages: {httpd: "2.4.57-5.el9"}
+  files:
+    /etc/httpd/conf/httpd.conf: |
+      ServerRoot "/etc/httpd"
+      User apache
+      Group apache
+      <Directory />
+          AllowOverride none
+          Require all denied
+      </Directory>
+      DocumentRoot "/var/www/html"
+      IncludeOptional conf.d/*.conf
+    /etc/httpd/conf.modules.d/00-base.conf: "LoadModule reqtimeout_module modules/mod_reqtimeout.so\n"
+checks:
+  - id: apache:status-info-public
+    title: Apache server-status or server-info open to everyone
+    description: mod_status shows every client IP and requested URL (including tokens in query strings) and mod_info dumps the full configuration; a Location for them with Require all granted publishes that to the internet.
+    severity: high
+    probe:
+      type: content
+      path: [/etc/httpd/conf/httpd.conf, /etc/httpd/conf.d/*.conf, /etc/httpd/conf.modules.d/*.conf, /etc/apache2/apache2.conf, /etc/apache2/conf-enabled/*.conf, /etc/apache2/mods-enabled/*.conf, /etc/apache2/sites-enabled/*]
+      regex: '(?i)<Location[^>]*>[^<]*(SetHandler\s+server-(status|info)[^<]*(Require\s+all\s+granted|Allow\s+from\s+all)|(Require\s+all\s+granted|Allow\s+from\s+all)[^<]*SetHandler\s+server-(status|info))'
+    expect: [match eq false]
+    evidence: "{path}:{lineno}: server-status/server-info location allows all clients"
+    remediation: Restrict the handler to localhost or an admin network (Require local / Require ip 10.0.0.0/8).
+    references: [https://httpd.apache.org/docs/2.4/mod/mod_status.html]
+    tests:
+      pass: {files: {/etc/httpd/conf.d/status.conf: "<Location \"/server-status\">\n    SetHandler server-status\n    Require local\n</Location>\n"}}
+      fail: {files: {/etc/httpd/conf.d/status.conf: "<Location \"/server-status\">\n    SetHandler server-status\n    Require all granted\n</Location>\n"}}
+
+  - id: apache:userdir-enabled
+    title: Apache UserDir serves users' home directories
+    description: mod_userdir publishes ~/public_html of every account, exposing files users never meant to publish and confirming which accounts exist.
+    severity: low
+    probe: {type: config, format: apache, key: userdir, default: disabled}
+    expect: ['value regex (?i)^disabled']
+    remediation: Disable mod_userdir (a2dismod userdir) or set UserDir disabled and enable it only for named users.
+    references: [https://httpd.apache.org/docs/2.4/mod/mod_userdir.html]
+    tests:
+      pass: {files: {/etc/httpd/conf.d/userdir.conf: "UserDir disabled\n"}}
+      fail: {files: {/etc/httpd/conf.d/userdir.conf: "UserDir public_html\n"}}
+
+  - id: apache:fileetag-inode
+    title: Apache ETags include inode numbers
+    description: FileETag INode (or All) leaks inode numbers and makes ETags differ between load-balanced nodes.
+    severity: low
+    level: strict
+    probe: {type: config, format: apache, key: fileetag, default: MTime Size}
+    expect: ['value not_regex (?i)\b(inode|all)\b']
+    remediation: FileETag MTime Size (the 2.4 default) or FileETag None.
+    references: [https://httpd.apache.org/docs/2.4/mod/core.html#fileetag]
+    tests:
+      pass: {}
+      fail: {files: {/etc/httpd/conf.d/etag.conf: "FileETag INode MTime Size\n"}}
+
+  - id: apache:ssl-compression
+    title: Apache TLS compression enabled (CRIME)
+    description: SSLCompression on enables TLS-level compression, which lets an attacker recover cookies through the CRIME attack.
+    severity: medium
+    probe: {type: config, format: apache, key: sslcompression, default: "off"}
+    expect: [value ne on]
+    remediation: SSLCompression off (the default).
+    references: [https://httpd.apache.org/docs/2.4/mod/mod_ssl.html#sslcompression, https://nvd.nist.gov/vuln/detail/CVE-2012-4929]
+    tests:
+      pass: {}
+      fail: {files: {/etc/httpd/conf.d/ssl.conf: "SSLCompression on\n"}}
+
+  - id: apache:weak-ssl-cipher
+    title: Apache allows weak TLS cipher suites
+    description: SSLCipherSuite enables RC4, 3DES, NULL, EXPORT, LOW, MD5 or anonymous suites, which can be broken or downgraded to.
+    severity: medium
+    probe: {type: config, format: apache, key: sslciphersuite}
+    expect: ['value not_regex (?i)(^|[:\s,+])(RC4|3DES|DES-CBC3-SHA|NULL|EXPORT|EXP|LOW|MD5|aNULL|eNULL|ADH|AECDH)([:\s,+@]|$)']
+    remediation: Use the Mozilla intermediate suite list or the system crypto policy (remove SSLCipherSuite to inherit it).
+    references: [https://ssl-config.mozilla.org/, https://httpd.apache.org/docs/2.4/mod/mod_ssl.html#sslciphersuite]
+    tests:
+      pass: {files: {/etc/httpd/conf.d/ssl.conf: "SSLCipherSuite HIGH:!aNULL:!MD5:!3DES\n"}}
+      fail: {files: {/etc/httpd/conf.d/ssl.conf: "SSLCipherSuite ALL:!ADH:RC4+RSA:+HIGH:+MEDIUM\n"}}
+
+  - id: apache:insecure-renegotiation
+    title: Apache allows insecure TLS renegotiation
+    description: SSLInsecureRenegotiation on re-enables renegotiation with clients lacking RFC 5746 support, allowing request-prefix injection (CVE-2009-3555).
+    severity: high
+    probe: {type: config, format: apache, key: sslinsecurerenegotiation, default: "off"}
+    expect: [value ne on]
+    remediation: SSLInsecureRenegotiation off (the default).
+    references: [https://httpd.apache.org/docs/2.4/mod/mod_ssl.html#sslinsecurerenegotiation, https://nvd.nist.gov/vuln/detail/CVE-2009-3555]
+    tests:
+      pass: {}
+      fail: {files: {/etc/httpd/conf.d/ssl.conf: "SSLInsecureRenegotiation on\n"}}
+
+  - id: apache:open-proxy
+    title: Apache acts as a forward proxy (ProxyRequests On)
+    description: ProxyRequests On turns httpd into a forward proxy; unless access is tightly restricted it is abused for spam, attacks and reaching internal services.
+    severity: high
+    probe: {type: config, format: apache, key: proxyrequests, default: "off"}
+    expect: [value ne on]
+    remediation: ProxyRequests Off (reverse proxying with ProxyPass does not need it).
+    references: [https://httpd.apache.org/docs/2.4/mod/mod_proxy.html#access]
+    tests:
+      pass: {files: {/etc/httpd/conf.d/proxy.conf: "ProxyRequests Off\nProxyPass /app http://127.0.0.1:8080/\n"}}
+      fail: {files: {/etc/httpd/conf.d/proxy.conf: "ProxyRequests On\n"}}
+
+  - id: apache:webdav-enabled
+    title: Apache WebDAV enabled
+    description: Dav On allows clients to upload, move and delete files in the location; without strong authentication that is an upload-to-RCE path.
+    severity: low
+    probe: {type: config, format: apache, key: dav, default: "off"}
+    expect: [value eq off]
+    remediation: Remove Dav On or protect the location with authentication and keep executable handlers off it.
+    references: [https://httpd.apache.org/docs/2.4/mod/mod_dav.html]
+    tests:
+      pass: {}
+      fail: {files: {/etc/httpd/conf.d/dav.conf: "<Location /dav>\n  Dav On\n</Location>\n"}}
+
+  - id: apache:root-dir-not-denied
+    title: Apache does not deny access to the filesystem root
+    description: Without <Directory /> Require all denied, any Alias or misrouted path can serve arbitrary files from the host.
+    severity: medium
+    tags: [cis]
+    applies_if: {file: [/etc/httpd/conf/httpd.conf, /etc/apache2/apache2.conf]}
+    probe: {type: config, format: apache, key: require}
+    where: ['context regex ^Directory\s+"?/"?$']
+    expect: ['value regex (?i)all\s+denied']
+    missing: fail
+    missing_evidence: no Require all denied inside <Directory />
+    remediation: "Add <Directory /> AllowOverride None / Require all denied </Directory> and grant access per document root."
+    references: [https://httpd.apache.org/docs/2.4/misc/security_tips.html#protectserverfiles]
+    tests:
+      pass: {}
+      fail:
+        - files: {/etc/httpd/conf/httpd.conf: "ServerRoot \"/etc/httpd\"\n<Directory />\n  Require all granted\n</Directory>\n"}
+        - files: {/etc/httpd/conf/httpd.conf: "ServerRoot \"/etc/httpd\"\nUser apache\n"}
+
+  - id: apache:allowoverride-root
+    title: Apache allows .htaccess overrides at the filesystem root
+    description: AllowOverride All on <Directory /> lets any .htaccess anywhere change access control and handlers.
+    severity: low
+    probe: {type: config, format: apache, key: allowoverride}
+    where: ['context regex ^Directory\s+"?/"?$']
+    expect: ['value regex (?i)^none$']
+    remediation: AllowOverride None on <Directory />; allow only the needed override classes per site.
+    references: [https://httpd.apache.org/docs/2.4/mod/core.html#allowoverride]
+    tests:
+      pass: {}
+      fail: {files: {/etc/httpd/conf/httpd.conf: "<Directory />\n  AllowOverride All\n  Require all denied\n</Directory>\n"}}
+
+  - id: apache:documentroot-dangerous
+    title: Apache serves a system directory as DocumentRoot
+    description: A DocumentRoot of /, /etc, /root, /home or another system directory exposes host files to visitors.
+    severity: critical
+    level: basic
+    probe: {type: config, format: apache, key: documentroot}
+    expect: ['value not_regex ^"?/(etc|root|proc|sys|home|var|usr|boot|opt|srv)?/?"?$']
+    remediation: Point DocumentRoot at a dedicated web directory.
+    references: [https://httpd.apache.org/docs/2.4/mod/core.html#documentroot]
+    tests:
+      pass: {}
+      fail: {files: {/etc/httpd/conf.d/site.conf: "<VirtualHost *:80>\n  DocumentRoot \"/\"\n</VirtualHost>\n"}}
+
+  - id: apache:conf-world-writable
+    title: Apache configuration writable by any user
+    description: Anyone who can edit httpd configuration can load modules or run commands as root on the next reload.
+    severity: high
+    tags: [cis]
+    probe:
+      type: file
+      path: [/etc/httpd, /etc/httpd/conf/httpd.conf, /etc/httpd/conf.d/*.conf, /etc/httpd/conf.modules.d/*.conf, /etc/apache2, /etc/apache2/apache2.conf, /etc/apache2/envvars, /etc/apache2/conf-available/*.conf, /etc/apache2/mods-available/*, /etc/apache2/sites-available/*]
+    expect: [mode bits_none 0002]
+    remediation: Remove world write permission.
+    fix: chmod o-w {path}
+    references: [https://www.cisecurity.org/benchmark/apache_http_server]
+    tests:
+      pass: {meta: {/etc/httpd/conf/httpd.conf: "0644 0 0"}}
+      fail: {meta: {/etc/httpd/conf/httpd.conf: "0666 0 0"}}
+
+  - id: apache:conf-not-root-owned
+    title: Apache configuration owned by a non-root user
+    description: The owner of a configuration file can change it; if that is the web user, a web compromise can rewrite the server configuration.
+    severity: medium
+    tags: [cis]
+    probe:
+      type: file
+      path: [/etc/httpd/conf/httpd.conf, /etc/httpd/conf.d/*.conf, /etc/httpd/conf.modules.d/*.conf, /etc/apache2/apache2.conf, /etc/apache2/envvars, /etc/apache2/conf-available/*.conf, /etc/apache2/sites-available/*]
+    expect: [uid eq 0]
+    remediation: Make root the owner of httpd configuration.
+    fix: chown root:root {path}
+    references: [https://www.cisecurity.org/benchmark/apache_http_server]
+    tests:
+      pass: {meta: {/etc/httpd/conf/httpd.conf: "0644 0 0"}}
+      fail: {meta: {/etc/httpd/conf/httpd.conf: "0644 48 48"}}
+
+  - id: apache:log-world-readable
+    title: Apache log files readable by any user
+    description: Access logs contain client IPs, URLs with tokens and session identifiers; local users should not read them.
+    severity: low
+    level: strict
+    probe: {type: file, path: [/var/log/httpd/*log, /var/log/apache2/*.log]}
+    expect: [mode bits_none 0004]
+    remediation: Restrict log permissions (0640, group adm on Debian).
+    fix: chmod o-r {path}
+    references: [https://httpd.apache.org/docs/2.4/logs.html#security]
+    tests:
+      pass: {files: {/var/log/httpd/access_log: ""}, meta: {/var/log/httpd/access_log: "0600 0 0"}}
+      fail: {files: {/var/log/httpd/access_log: ""}, meta: {/var/log/httpd/access_log: "0644 0 0"}}
+
+  - id: apache:htpasswd-world-readable
+    title: Apache basic-auth password file readable by any user
+    description: Local users can copy the htpasswd hashes and crack them offline.
+    severity: medium
+    probe:
+      type: file
+      path: [/etc/httpd/.htpasswd*, /etc/httpd/conf/.htpasswd*, /etc/httpd/*.htpasswd, /etc/apache2/.htpasswd*, /etc/apache2/*.htpasswd, /etc/apache2/htpasswd*]
+    expect: [mode bits_none 0004]
+    remediation: Make the file readable only by root and the web server group.
+    fix: chmod 640 {path}
+    references: [https://httpd.apache.org/docs/2.4/howto/auth.html]
+    tests:
+      pass: {files: {/etc/httpd/.htpasswd: "admin:$apr1$x$y\n"}, meta: {/etc/httpd/.htpasswd: "0640 0 48"}}
+      fail: {files: {/etc/httpd/.htpasswd: "admin:$apr1$x$y\n"}, meta: {/etc/httpd/.htpasswd: "0644 0 0"}}
+
+  - id: apache:htpasswd-weak-hash
+    title: Apache basic-auth file uses weak or plain-text password hashes
+    description: Entries stored in plain text, as unsalted {SHA} or as 8-character DES crypt are trivially recovered from a leaked file.
+    severity: medium
+    probe:
+      type: content
+      secret: true
+      path: [/etc/httpd/.htpasswd*, /etc/httpd/conf/.htpasswd*, /etc/httpd/*.htpasswd, /etc/apache2/.htpasswd*, /etc/apache2/*.htpasswd, /etc/apache2/htpasswd*]
+      regex: '^[^:#\s]+:(\{SHA\}|\{PLAIN\}|[^$:\s{][^:\s]*$)'
+    expect: [match eq false]
+    evidence: "{path}:{lineno}: entry with a weak hash (value not shown)"
+    remediation: Re-create the entries with bcrypt.
+    fix: htpasswd -B {path} <user>
+    references: [https://httpd.apache.org/docs/2.4/misc/password_encryptions.html]
+    tests:
+      pass: {files: {/etc/httpd/.htpasswd: "admin:$2y$05$abcdefghijklmnopqrstuv\n"}}
+      fail: {files: {/etc/httpd/.htpasswd: "admin:{SHA}lync-test-secret\n"}}
+
+  - id: apache:no-reqtimeout
+    title: Apache mod_reqtimeout is not loaded (Slowloris)
+    description: mod_reqtimeout bounds how long a client may take to send headers and body; without it a handful of slow connections exhausts all workers.
+    severity: low
+    level: strict
+    probe:
+      type: content
+      combine: true
+      path: [/etc/httpd/conf/httpd.conf, /etc/httpd/conf.modules.d/*.conf, /etc/apache2/mods-enabled/*.load]
+      regex: '^\s*LoadModule\s+reqtimeout_module'
+    expect: [match eq true]
+    evidence: "LoadModule reqtimeout_module not found"
+    remediation: Enable mod_reqtimeout (a2enmod reqtimeout) with its default RequestReadTimeout.
+    references: [https://httpd.apache.org/docs/2.4/mod/mod_reqtimeout.html]
+    tests:
+      pass: {}
+      fail: {files: {/etc/httpd/conf.modules.d/00-base.conf: "LoadModule mime_module modules/mod_mime.so\n"}}

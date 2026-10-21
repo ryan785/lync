@@ -1,0 +1,260 @@
+pack: nginx
+title: nginx web server
+description: nginx configuration and file permissions beyond the original web-server rule (server_tokens, TLS protocols/ciphers, security headers and autoindex are checked there).
+category: config
+applies_if:
+  any:
+    - package: [nginx, nginx-core, nginx-full, nginx-light, nginx-extras, nginx-mainline, openresty]
+    - file: /etc/nginx/nginx.conf
+references:
+  - https://nginx.org/en/docs/
+test_base:
+  os: rocky:9.4
+  packages: {nginx: "1.24.0-1.el9"}
+  files:
+    /etc/nginx/nginx.conf: |
+      user nginx;
+      events {}
+      http {
+          server { listen 80; root /usr/share/nginx/html; }
+      }
+checks:
+  - id: nginx:user-root
+    title: nginx worker processes run as root
+    description: The user directive makes nginx workers (which parse every request) run as root, so any bug in nginx or a module becomes a full host compromise.
+    severity: high
+    level: basic
+    probe: {type: config, format: nginx, key: user, default: nobody}
+    expect: ['value not_regex ^root(\s|$)']
+    remediation: Run workers as an unprivileged account (nginx, www-data) and reload nginx.
+    fix: "sed -i 's/^\\s*user\\s\\+root/user nginx/' /etc/nginx/nginx.conf && nginx -t && systemctl reload nginx"
+    references: [https://nginx.org/en/docs/ngx_core_module.html#user]
+    tests:
+      pass:
+        - {name: explicit user}
+        - name: user unset
+          files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { listen 80; } }\n"}
+      fail: {files: {/etc/nginx/nginx.conf: "user root root;\nevents {}\nhttp { server { listen 80; } }\n"}}
+      na: {packages: {nginx: "!absent"}, files: {/etc/nginx/nginx.conf: "!absent"}}
+
+  - id: nginx:root-dangerous
+    title: nginx serves a system directory as document root
+    description: A root directive pointing at /, /etc, /root, /home or another system directory lets visitors download arbitrary host files (shadow backups, keys, configs).
+    severity: critical
+    level: basic
+    probe: {type: config, format: nginx, key: root, default: html}
+    expect: ['value not_regex ^/(etc|root|proc|sys|home|var|usr|boot|opt|srv)?/?$']
+    remediation: Point root at a dedicated web directory (e.g. /var/www/site/public).
+    references: [https://nginx.org/en/docs/http/ngx_http_core_module.html#root]
+    tests:
+      pass: {}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { listen 80; root /; } }\n"}}
+
+  - id: nginx:alias-dangerous
+    title: nginx alias exposes a system directory
+    description: An alias to /, /etc, /root, /home or another system directory serves host files to anyone who requests the location.
+    severity: critical
+    level: basic
+    probe: {type: config, format: nginx, key: alias}
+    expect: ['value not_regex ^/(etc|root|proc|sys|home|var|usr|boot|opt|srv)?/?$']
+    remediation: Alias only dedicated asset directories.
+    references: [https://nginx.org/en/docs/http/ngx_http_core_module.html#alias]
+    tests:
+      pass: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { location /static/ { alias /var/www/static/; } } }\n"}}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { location /x/ { alias /etc/; } } }\n"}}
+
+  - id: nginx:alias-traversal
+    title: nginx alias path traversal (location without trailing slash)
+    description: "A prefix location without a trailing slash combined with an alias ending in a slash (location /static { alias /srv/static/; }) lets /static../ escape the aliased directory and read its parent (the classic off-by-slash bug)."
+    severity: high
+    probe:
+      type: content
+      path: [/etc/nginx/nginx.conf, /etc/nginx/conf.d/*.conf, /etc/nginx/sites-enabled/*, /etc/nginx/default.d/*.conf]
+      regex: 'location\s+(?:\^~\s+)?/[^\s{;]*[^/\s{;]\s*\{[^{}]*?\balias\s+[^;\s]*/\s*;'
+    expect: [match eq false]
+    evidence: "{path}:{lineno}: location without trailing slash uses an alias ending in /"
+    remediation: Add a trailing slash to the location (location /static/ { alias /srv/static/; }) or remove it from the alias.
+    references: [https://nginx.org/en/docs/http/ngx_http_core_module.html#alias]
+    tests:
+      pass: {files: {/etc/nginx/conf.d/site.conf: "server {\n  location /static/ {\n    alias /srv/static/;\n  }\n}\n"}}
+      fail: {files: {/etc/nginx/conf.d/site.conf: "server {\n  location /static {\n    alias /srv/static/;\n  }\n}\n"}}
+
+  - id: nginx:merge-slashes-off
+    title: nginx merge_slashes is off
+    description: With merge_slashes off, //admin/x no longer matches location /admin/, so access rules on prefix locations can be bypassed.
+    severity: medium
+    probe: {type: config, format: nginx, key: merge_slashes, default: "on"}
+    expect: [value ne off]
+    remediation: Remove merge_slashes off (or make every access rule robust to repeated slashes).
+    references: [https://nginx.org/en/docs/http/ngx_http_core_module.html#merge_slashes]
+    tests:
+      pass: {}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { merge_slashes off; server { listen 80; } }\n"}}
+
+  - id: nginx:client-max-body-unlimited
+    title: nginx accepts request bodies of unlimited size
+    description: client_max_body_size 0 disables the request body limit, letting any client fill disk/temp space with uploads.
+    severity: low
+    probe: {type: config, format: nginx, key: client_max_body_size, default: 1m}
+    expect: [value ne 0]
+    remediation: Set client_max_body_size to the largest upload the application needs (e.g. 64m).
+    references: [https://nginx.org/en/docs/http/ngx_http_core_module.html#client_max_body_size]
+    tests:
+      pass: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { client_max_body_size 64m; server { listen 80; } }\n"}}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { client_max_body_size 0; server { listen 80; } }\n"}}
+
+  - id: nginx:ssi-on
+    title: nginx server-side includes enabled
+    description: ssi on parses responses for <!--# --> commands; with user-controlled content this enables SSI injection (file inclusion, information disclosure).
+    severity: low
+    probe: {type: config, format: nginx, key: ssi, default: "off"}
+    expect: [value ne on]
+    remediation: Remove ssi on unless the site really uses server-side includes on trusted files only.
+    references: [https://nginx.org/en/docs/http/ngx_http_ssi_module.html]
+    tests:
+      pass: {}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { listen 80; ssi on; } }\n"}}
+
+  - id: nginx:access-log-off
+    title: nginx access logging disabled globally
+    description: access_log off in the http block removes the request trail needed to investigate an intrusion.
+    severity: low
+    probe: {type: config, format: nginx, key: access_log, default: "logs/access.log combined"}
+    where: [context eq http]
+    expect: [value ne off]
+    remediation: Keep access_log enabled at http level; disable it only for specific noisy locations.
+    references: [https://nginx.org/en/docs/http/ngx_http_log_module.html#access_log]
+    tests:
+      pass: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { access_log /var/log/nginx/access.log; server { location /health { access_log off; } } }\n"}}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { access_log off; server { listen 80; } }\n"}}
+
+  - id: nginx:error-log-debug
+    title: nginx error log at debug level
+    description: Debug logging writes request headers and bodies (cookies, credentials) to disk and grows quickly.
+    severity: low
+    level: strict
+    probe: {type: config, format: nginx, key: error_log, default: "logs/error.log error"}
+    expect: ['value not_regex \sdebug\s*$']
+    remediation: Use error_log ... warn (or error) in production.
+    references: [https://nginx.org/en/docs/ngx_core_module.html#error_log]
+    tests:
+      pass: {}
+      fail: {files: {/etc/nginx/nginx.conf: "error_log /var/log/nginx/error.log debug;\nevents {}\nhttp { server { listen 80; } }\n"}}
+
+  - id: nginx:conf-world-writable
+    title: nginx configuration writable by any user
+    description: Anyone who can edit nginx configuration can make the root-started master load arbitrary modules, proxy traffic or serve any file.
+    severity: high
+    tags: [cis]
+    probe:
+      type: file
+      path: [/etc/nginx, /etc/nginx/nginx.conf, /etc/nginx/conf.d/*.conf, /etc/nginx/default.d/*.conf, /etc/nginx/sites-available/*, /etc/nginx/sites-enabled/*]
+    expect: [mode bits_none 0002]
+    remediation: Remove world write permission.
+    fix: chmod o-w {path}
+    references: [https://www.cisecurity.org/benchmark/nginx]
+    tests:
+      pass:
+        meta: {/etc/nginx/nginx.conf: "0644 0 0", /etc/nginx/sites-available/site: "0644 0 0"}
+        files: {/etc/nginx/sites-available/site: "server {}\n"}
+        links: {/etc/nginx/sites-enabled/site: /etc/nginx/sites-available/site}
+      fail: {meta: {/etc/nginx/nginx.conf: "0666 0 0"}}
+
+  - id: nginx:conf-not-root-owned
+    title: nginx configuration owned by a non-root user
+    description: The owner of a configuration file can change it; if that is the nginx/web user, a web compromise can rewrite the server configuration.
+    severity: medium
+    tags: [cis]
+    probe:
+      type: file
+      path: [/etc/nginx/nginx.conf, /etc/nginx/conf.d/*.conf, /etc/nginx/default.d/*.conf, /etc/nginx/sites-available/*]
+    expect: [uid eq 0]
+    remediation: Make root the owner of nginx configuration.
+    fix: chown root:root {path}
+    references: [https://www.cisecurity.org/benchmark/nginx]
+    tests:
+      pass: {meta: {/etc/nginx/nginx.conf: "0644 0 0"}}
+      fail: {meta: {/etc/nginx/nginx.conf: "0644 991 991"}}
+
+  - id: nginx:log-world-readable
+    title: nginx log files readable by any user
+    description: Access logs contain client IPs, URLs with tokens and session identifiers; local users should not read them.
+    severity: low
+    level: strict
+    probe: {type: file, path: [/var/log/nginx/*.log]}
+    expect: [mode bits_none 0004]
+    remediation: Restrict log permissions (Debian uses 0640 www-data:adm via logrotate's create directive).
+    fix: chmod o-r {path}
+    references: [https://nginx.org/en/docs/http/ngx_http_log_module.html]
+    tests:
+      pass: {files: {/var/log/nginx/access.log: ""}, meta: {/var/log/nginx/access.log: "0640 33 4"}}
+      fail: {files: {/var/log/nginx/access.log: ""}, meta: {/var/log/nginx/access.log: "0644 0 0"}}
+
+  - id: nginx:htpasswd-world-readable
+    title: nginx basic-auth password file readable by any user
+    description: Local users can copy the htpasswd hashes and crack them offline.
+    severity: medium
+    probe:
+      type: file
+      path: [/etc/nginx/.htpasswd*, /etc/nginx/htpasswd*, /etc/nginx/*.htpasswd, /etc/nginx/conf.d/*.htpasswd, /etc/nginx/auth/*]
+    expect: [mode bits_none 0004]
+    remediation: Make the file readable only by root and the nginx group.
+    fix: chown root:nginx {path} && chmod 640 {path}
+    references: [https://nginx.org/en/docs/http/ngx_http_auth_basic_module.html]
+    tests:
+      pass: {files: {/etc/nginx/.htpasswd: "admin:$apr1$x$y\n"}, meta: {/etc/nginx/.htpasswd: "0640 0 991"}}
+      fail: {files: {/etc/nginx/.htpasswd: "admin:$apr1$x$y\n"}, meta: {/etc/nginx/.htpasswd: "0644 0 0"}}
+
+  - id: nginx:htpasswd-weak-hash
+    title: nginx basic-auth file uses weak or plain-text password hashes
+    description: Entries stored in plain text, as unsalted {SHA} or as 8-character DES crypt are trivially recovered from a leaked file.
+    severity: medium
+    probe:
+      type: content
+      secret: true
+      path: [/etc/nginx/.htpasswd*, /etc/nginx/htpasswd*, /etc/nginx/*.htpasswd, /etc/nginx/conf.d/*.htpasswd, /etc/nginx/auth/*]
+      regex: '^[^:#\s]+:(\{SHA\}|\{PLAIN\}|[^$:\s{][^:\s]*$)'
+    expect: [match eq false]
+    evidence: "{path}:{lineno}: entry with a weak hash (value not shown)"
+    remediation: Re-create the entries with bcrypt (htpasswd -B) or $apr1$/SHA-512 crypt.
+    fix: htpasswd -B {path} <user>
+    references: [https://httpd.apache.org/docs/2.4/misc/password_encryptions.html]
+    tests:
+      pass: {files: {/etc/nginx/.htpasswd: "admin:$2y$05$abcdefghijklmnopqrstuv\n"}}
+      fail: {files: {/etc/nginx/.htpasswd: "admin:lync-test-secret\n"}}
+
+  - id: nginx:csp-missing
+    title: nginx sends no Content-Security-Policy header
+    description: A CSP limits what an XSS bug can do (script sources, framing, form targets). No add_header Content-Security-Policy appears anywhere in the nginx configuration.
+    severity: low
+    level: strict
+    probe:
+      type: content
+      combine: true
+      path: [/etc/nginx/nginx.conf, /etc/nginx/conf.d/*.conf, /etc/nginx/sites-enabled/*, /etc/nginx/default.d/*.conf, /etc/nginx/snippets/*.conf]
+      regex: '(?i)add_header\s+["'']?Content-Security-Policy'
+    expect: [match eq true]
+    evidence: "no add_header Content-Security-Policy in the nginx configuration"
+    remediation: Add a Content-Security-Policy header appropriate for the application (start with Content-Security-Policy-Report-Only).
+    references: [https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP]
+    tests:
+      pass: {files: {/etc/nginx/conf.d/headers.conf: "add_header Content-Security-Policy \"default-src 'self'\" always;\n"}}
+      fail: {}
+
+  - id: nginx:referrer-policy-missing
+    title: nginx sends no Referrer-Policy header
+    description: Without a Referrer-Policy, full URLs (including tokens in query strings) leak to third-party sites through the Referer header on older browsers and custom policies.
+    severity: low
+    level: strict
+    probe:
+      type: content
+      combine: true
+      path: [/etc/nginx/nginx.conf, /etc/nginx/conf.d/*.conf, /etc/nginx/sites-enabled/*, /etc/nginx/default.d/*.conf, /etc/nginx/snippets/*.conf]
+      regex: '(?i)add_header\s+["'']?Referrer-Policy'
+    expect: [match eq true]
+    evidence: "no add_header Referrer-Policy in the nginx configuration"
+    remediation: add_header Referrer-Policy strict-origin-when-cross-origin always;
+    references: [https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy]
+    tests:
+      pass: {files: {/etc/nginx/conf.d/headers.conf: "add_header Referrer-Policy strict-origin-when-cross-origin always;\n"}}
+      fail: {}

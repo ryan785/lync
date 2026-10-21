@@ -1,0 +1,405 @@
+pack: webapps
+title: Web applications (WordPress, Laravel, Nextcloud, Drupal, Joomla, Magento, phpMyAdmin)
+description: Configuration files and settings of common PHP applications installed under /var/www, /srv/www, /usr/share/nginx/html or ~/public_html. Exposed secrets and files under nginx/httpd document roots are also covered by web:sensitive-file; these checks look at permissions and application settings.
+category: config
+references:
+  - https://owasp.org/www-project-top-ten/
+checks:
+  # ---- WordPress --------------------------------------------------------------
+  - id: wordpress:config-world-readable
+    title: "WordPress wp-config.php readable by any local user: {path}"
+    description: wp-config.php holds the database password and authentication salts; world-readable means every local account (and every other site's PHP user) can take over the site.
+    severity: high
+    applies_if: &wp {file: [/var/www/wp-config.php, /var/www/*/wp-config.php, /var/www/*/*/wp-config.php, /srv/www/*/wp-config.php, /srv/www/*/*/wp-config.php, /usr/share/nginx/html/wp-config.php, /home/*/public_html/wp-config.php]}
+    probe: &wpcfg {type: file, path: [/var/www/wp-config.php, /var/www/*/wp-config.php, /var/www/*/*/wp-config.php, /srv/www/*/wp-config.php, /srv/www/*/*/wp-config.php, /usr/share/nginx/html/wp-config.php, /home/*/public_html/wp-config.php]}
+    expect: [mode bits_none 0004]
+    remediation: Make wp-config.php readable only by its owner and the PHP user's group; rotate the DB password and salts if other users had shell access.
+    fix: chmod 640 {path}
+    references: [https://developer.wordpress.org/advanced-administration/security/hardening/#securing-wp-config-php]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\n"}, meta: {/var/www/html/wp-config.php: "0640 0 33"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\n"}, meta: {/var/www/html/wp-config.php: "0644 33 33"}}
+      na: {}
+
+  - id: wordpress:config-world-writable
+    title: "WordPress wp-config.php writable by any local user: {path}"
+    description: Anyone who can write wp-config.php can run PHP code on every request to the site.
+    severity: critical
+    applies_if: *wp
+    probe: *wpcfg
+    expect: [mode bits_none 0002]
+    remediation: Remove world write permission.
+    fix: chmod o-w {path}
+    references: [https://developer.wordpress.org/advanced-administration/security/hardening/#file-permissions]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\n"}, meta: {/var/www/html/wp-config.php: "0640 0 33"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\n"}, meta: {/var/www/html/wp-config.php: "0666 33 33"}}
+
+  - id: wordpress:debug-enabled
+    title: "WordPress WP_DEBUG enabled: {path}"
+    description: WP_DEBUG shows PHP notices and paths to visitors (WP_DEBUG_DISPLAY defaults to true) and often writes a public wp-content/debug.log.
+    severity: medium
+    applies_if: *wp
+    probe: &wpcontent
+      type: content
+      path: [/var/www/wp-config.php, /var/www/*/wp-config.php, /var/www/*/*/wp-config.php, /srv/www/*/wp-config.php, /srv/www/*/*/wp-config.php, /usr/share/nginx/html/wp-config.php, /home/*/public_html/wp-config.php]
+      regex: '^\s*define\s*\(\s*[''"]WP_DEBUG[''"]\s*,\s*(true|1)\s*\)'
+    expect: [match eq false]
+    remediation: "define('WP_DEBUG', false); in production."
+    references: [https://developer.wordpress.org/advanced-administration/debug/debug-wordpress/]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\ndefine( 'WP_DEBUG', false );\n"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\ndefine( 'WP_DEBUG', true );\n"}}
+
+  - id: wordpress:debug-log-present
+    title: "WordPress debug.log in the web root: {path}"
+    description: wp-content/debug.log is served to anyone by default and contains paths, SQL errors and sometimes user data.
+    severity: medium
+    applies_if: *wp
+    probe: {type: file, path: [/var/www/wp-content/debug.log, /var/www/*/wp-content/debug.log, /var/www/*/*/wp-content/debug.log, /srv/www/*/wp-content/debug.log, /srv/www/*/*/wp-content/debug.log, /usr/share/nginx/html/wp-content/debug.log, /home/*/public_html/wp-content/debug.log]}
+    expect_none: true
+    remediation: Delete the file, disable WP_DEBUG_LOG or point it outside the web root.
+    fix: rm {path}
+    references: [https://developer.wordpress.org/advanced-administration/debug/debug-wordpress/#wp_debug_log]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\n"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\n", /var/www/html/wp-content/debug.log: "PHP Notice\n"}}
+
+  - id: wordpress:file-edit-enabled
+    title: "WordPress built-in theme/plugin editor enabled: {path}"
+    description: Without DISALLOW_FILE_EDIT, a stolen admin session turns into PHP code execution through Appearance > Theme File Editor.
+    severity: medium
+    applies_if: *wp
+    probe:
+      <<: *wpcontent
+      regex: '^\s*define\s*\(\s*[''"](DISALLOW_FILE_EDIT|DISALLOW_FILE_MODS)[''"]\s*,\s*(true|1)\s*\)'
+    expect: [match eq true]
+    evidence: "{path}: DISALLOW_FILE_EDIT is not set to true"
+    remediation: "Add define('DISALLOW_FILE_EDIT', true); to wp-config.php."
+    references: [https://developer.wordpress.org/advanced-administration/wordpress/wp-config/#disable-the-plugin-and-theme-file-editor]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\ndefine( 'DISALLOW_FILE_EDIT', true );\n"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\ndefine( 'WP_DEBUG', false );\n"}}
+
+  - id: wordpress:auto-updates-disabled
+    title: "WordPress automatic updates disabled: {path}"
+    description: AUTOMATIC_UPDATER_DISABLED stops WordPress from installing security releases; vulnerable plugins and core are the most common way WordPress sites are compromised.
+    severity: medium
+    applies_if: *wp
+    probe:
+      <<: *wpcontent
+      regex: '^\s*define\s*\(\s*[''"]AUTOMATIC_UPDATER_DISABLED[''"]\s*,\s*(true|1)\s*\)'
+    expect: [match eq false]
+    remediation: Remove AUTOMATIC_UPDATER_DISABLED (or apply updates through another automated process).
+    references: [https://developer.wordpress.org/advanced-administration/upgrade/upgrading/#configuring-automatic-background-updates]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\n"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\ndefine('AUTOMATIC_UPDATER_DISABLED', true);\n"}}
+
+  - id: wordpress:default-salts
+    title: "WordPress authentication keys/salts never set: {path}"
+    description: wp-config.php still contains 'put your unique phrase here'; the salts are public, so auth cookies can be forged.
+    severity: high
+    applies_if: *wp
+    probe:
+      <<: *wpcontent
+      regex: 'put your unique phrase here'
+    expect: [match eq false]
+    remediation: Generate new keys at https://api.wordpress.org/secret-key/1.1/salt/ and replace the define() lines.
+    references: [https://developer.wordpress.org/advanced-administration/wordpress/wp-config/#security-keys]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\ndefine( 'AUTH_KEY', 'q8#x' );\n"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\ndefine( 'AUTH_KEY', 'put your unique phrase here' );\n"}}
+
+  - id: wordpress:db-root-user
+    title: "WordPress connects to the database as root: {path}"
+    description: With DB_USER root, an SQL injection or a leaked wp-config.php gives full control of every database on the server.
+    severity: medium
+    applies_if: *wp
+    probe:
+      <<: *wpcontent
+      regex: 'define\s*\(\s*[''"]DB_USER[''"]\s*,\s*[''"]root[''"]'
+    expect: [match eq false]
+    remediation: Create a dedicated database user with privileges on the WordPress database only.
+    references: [https://developer.wordpress.org/advanced-administration/security/hardening/#database-security]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\ndefine( 'DB_USER', 'wp_site' );\n"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\ndefine( 'DB_USER', 'root' );\n"}}
+
+  - id: wordpress:php-in-uploads
+    title: "PHP file in WordPress uploads: {path}"
+    description: wp-content/uploads should only hold media. A PHP file there is a typical webshell left by a vulnerable upload plugin.
+    severity: high
+    applies_if: *wp
+    probe:
+      type: walk
+      roots: [/var/www/*/wp-content/uploads, /var/www/*/*/wp-content/uploads, /srv/www/*/wp-content/uploads, /usr/share/nginx/html/wp-content/uploads, /home/*/public_html/wp-content/uploads]
+      match: ["*.php", "*.phtml", "*.php[0-9]", "*.phar"]
+      file_type: file
+      max_depth: 6
+    where: [name ne index.php]
+    expect_none: true
+    remediation: Investigate and remove the file, and deny PHP execution in uploads in the web server configuration.
+    references: [https://developer.wordpress.org/advanced-administration/security/hardening/]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\n", /var/www/html/wp-content/uploads/2026/05/photo.jpg: "x", /var/www/html/wp-content/uploads/index.php: "<?php // Silence is golden.\n"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\n", /var/www/html/wp-content/uploads/2026/05/thumb.php: "<?php echo 1;\n"}}
+
+  - id: wordpress:xmlrpc-not-blocked
+    title: WordPress xmlrpc.php is not blocked
+    description: xmlrpc.php allows hundreds of password guesses per request (system.multicall) and pingback-based DDoS; most sites don't need it.
+    severity: low
+    applies_if: *wp
+    probe:
+      type: content
+      combine: true
+      path: [/etc/nginx/nginx.conf, /etc/nginx/conf.d/*.conf, /etc/nginx/sites-enabled/*, /etc/httpd/conf.d/*.conf, /etc/apache2/sites-enabled/*, /etc/apache2/conf-enabled/*.conf, /var/www/*/.htaccess, /var/www/*/*/.htaccess]
+      regex: 'xmlrpc'
+    expect: [match eq true]
+    evidence: "no web server rule mentions xmlrpc.php"
+    remediation: "Deny it in the web server (nginx: location = /xmlrpc.php { deny all; }) or with a security plugin, unless Jetpack/mobile apps need it."
+    references: [https://developer.wordpress.org/advanced-administration/security/brute-force/#xml-rpc]
+    tests:
+      pass: {files: {/var/www/html/wp-config.php: "<?php\n", /etc/nginx/conf.d/wp.conf: "location = /xmlrpc.php { deny all; }\n"}}
+      fail: {files: {/var/www/html/wp-config.php: "<?php\n", /etc/nginx/conf.d/wp.conf: "server { listen 80; }\n"}}
+
+  # ---- Laravel / Pterodactyl --------------------------------------------------
+  - id: laravel:env-world-readable
+    title: "Laravel .env readable by any local user: {path}"
+    description: The Laravel .env holds APP_KEY (session/cookie encryption; leaking it has led to RCE through unserialize) and database/mail credentials. secrets:world-readable reports the same file when it sees secret-looking keys.
+    severity: high
+    applies_if: &laravel {file: [/var/www/*/artisan, /var/www/*/*/artisan, /srv/www/*/artisan]}
+    probe: {type: file, path: [/var/www/*/.env, /var/www/*/*/.env, /srv/www/*/.env]}
+    expect: [mode bits_none 0004]
+    remediation: Make .env readable only by the application user (and the PHP group); rotate APP_KEY and credentials if other users had access.
+    fix: chmod 640 {path}
+    references: [https://laravel.com/docs/configuration#environment-file-security]
+    tests:
+      pass: {files: {/var/www/app/artisan: "", /var/www/app/.env: "APP_KEY=lync-test-secret\n"}, meta: {/var/www/app/.env: "0640 1000 33"}}
+      fail: {files: {/var/www/app/artisan: "", /var/www/app/.env: "APP_KEY=lync-test-secret\n"}, meta: {/var/www/app/.env: "0644 1000 1000"}}
+      na: {files: {/var/www/app/.env: "X=1\n"}}
+
+  - id: laravel:app-debug
+    title: Laravel APP_DEBUG enabled
+    description: Debug mode renders full stack traces with environment variables and source excerpts to visitors; with old Ignition versions it was remote code execution (CVE-2021-3129).
+    severity: high
+    applies_if: *laravel
+    probe: &laravelenv {type: config, format: env, path: [/var/www/*/.env, /var/www/*/*/.env, /srv/www/*/.env], per_file: true, key: app_debug, keys: [app_key], default: "false"}
+    where: [app_key not_empty]
+    expect: ["value not_in true,1,on,yes,(true)"]
+    remediation: Set APP_DEBUG=false and run php artisan config:cache.
+    references: [https://laravel.com/docs/configuration#debug-mode, https://nvd.nist.gov/vuln/detail/CVE-2021-3129]
+    tests:
+      pass: {files: {/var/www/app/artisan: "", /var/www/app/.env: "APP_KEY=lync-test-secret\nAPP_DEBUG=false\n"}}
+      fail: {files: {/var/www/app/artisan: "", /var/www/app/.env: "APP_KEY=lync-test-secret\nAPP_DEBUG=true\n"}}
+
+  - id: laravel:app-env-not-production
+    title: "Laravel APP_ENV is not production"
+    description: Non-production environments relax protections (e.g. confirmation prompts, debug tooling such as Telescope or Debugbar may load).
+    severity: medium
+    applies_if: *laravel
+    probe:
+      <<: *laravelenv
+      key: app_env
+      default: production
+    where: [app_key not_empty]
+    expect: [value eq production]
+    remediation: Set APP_ENV=production on production servers and run php artisan config:cache.
+    references: [https://laravel.com/docs/configuration#environment-configuration]
+    tests:
+      pass: {files: {/var/www/app/artisan: "", /var/www/app/.env: "APP_KEY=lync-test-secret\nAPP_ENV=production\n"}}
+      fail: {files: {/var/www/app/artisan: "", /var/www/app/.env: "APP_KEY=lync-test-secret\nAPP_ENV=local\n"}}
+
+  - id: laravel:storage-world-writable
+    title: "Laravel storage/cache directory writable by any user: {path}"
+    description: storage/ and bootstrap/cache contain compiled views, cached config and sessions that Laravel loads as PHP; world-writable lets any local user inject code.
+    severity: medium
+    applies_if: *laravel
+    probe: {type: file, path: [/var/www/*/storage, /var/www/*/*/storage, /srv/www/*/storage, /var/www/*/bootstrap/cache, /var/www/*/*/bootstrap/cache, /srv/www/*/bootstrap/cache]}
+    expect: [mode bits_none 0002]
+    remediation: chmod 775 (or 770) and give the PHP user group ownership instead of 777.
+    fix: chmod -R o-w {path}
+    references: [https://laravel.com/docs/installation#directory-permissions]
+    tests:
+      pass: {files: {/var/www/app/artisan: ""}, meta: {/var/www/app/storage: "d0775 1000 33"}}
+      fail: {files: {/var/www/app/artisan: ""}, meta: {/var/www/app/storage: "d0777 1000 33"}}
+
+  - id: pterodactyl:wings-config-readable
+    title: Pterodactyl Wings configuration readable by any user
+    description: /etc/pterodactyl/config.yml contains the node token that authenticates Wings to the panel; with it an attacker controls every game server on the node.
+    severity: high
+    applies_if: {file: /etc/pterodactyl/config.yml}
+    probe: {type: file, path: /etc/pterodactyl/config.yml}
+    expect: [mode bits_none 0004]
+    remediation: chmod 600 /etc/pterodactyl/config.yml and regenerate the node token if it was exposed.
+    fix: chmod 600 /etc/pterodactyl/config.yml
+    references: [https://pterodactyl.io/wings/1.0/installing.html#configure]
+    tests:
+      pass: {files: {/etc/pterodactyl/config.yml: "token: lync-test-secret\n"}, meta: {/etc/pterodactyl/config.yml: "0600 0 0"}}
+      fail: {files: {/etc/pterodactyl/config.yml: "token: lync-test-secret\n"}, meta: {/etc/pterodactyl/config.yml: "0644 0 0"}}
+      na: {}
+
+  # ---- Nextcloud --------------------------------------------------------------
+  - id: nextcloud:config-world-readable
+    title: "Nextcloud config.php readable by any local user: {path}"
+    description: config.php contains the database password, instance secret and password salt.
+    severity: high
+    applies_if: &nc {file: [/var/www/nextcloud/config/config.php, /var/www/html/nextcloud/config/config.php, /var/www/*/nextcloud/config/config.php, /srv/www/nextcloud/config/config.php, /usr/share/nginx/nextcloud/config/config.php]}
+    probe: {type: file, path: [/var/www/nextcloud/config/config.php, /var/www/html/nextcloud/config/config.php, /var/www/*/nextcloud/config/config.php, /srv/www/nextcloud/config/config.php, /usr/share/nginx/nextcloud/config/config.php]}
+    expect: [mode bits_none 0004]
+    remediation: chmod 640 config.php, owned by the web server user.
+    fix: chmod 640 {path}
+    references: [https://docs.nextcloud.com/server/latest/admin_manual/installation/harden_server.html]
+    tests:
+      pass: {files: {/var/www/nextcloud/config/config.php: "<?php\n"}, meta: {/var/www/nextcloud/config/config.php: "0640 33 33"}}
+      fail: {files: {/var/www/nextcloud/config/config.php: "<?php\n"}, meta: {/var/www/nextcloud/config/config.php: "0644 33 33"}}
+
+  - id: nextcloud:debug-enabled
+    title: "Nextcloud debug mode enabled: {path}"
+    description: "'debug' => true disables caching protections and shows detailed errors to users."
+    severity: medium
+    applies_if: *nc
+    probe: &nccontent
+      type: content
+      path: [/var/www/nextcloud/config/config.php, /var/www/html/nextcloud/config/config.php, /var/www/*/nextcloud/config/config.php, /srv/www/nextcloud/config/config.php, /usr/share/nginx/nextcloud/config/config.php]
+      regex: '[''"]debug[''"]\s*=>\s*true'
+    expect: [match eq false]
+    remediation: "Set 'debug' => false (or remove the key)."
+    references: [https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/config_sample_php_parameters.html#debug]
+    tests:
+      pass: {files: {/var/www/nextcloud/config/config.php: "<?php\n$CONFIG = array (\n  'debug' => false,\n);\n"}}
+      fail: {files: {/var/www/nextcloud/config/config.php: "<?php\n$CONFIG = array (\n  'debug' => true,\n);\n"}}
+
+  - id: nextcloud:data-in-webroot
+    title: "Nextcloud data directory inside the web root: {path}"
+    description: The default data/ directory under the Nextcloud install relies on .htaccess (ignored by nginx) to stay private; if routing is wrong, user files are downloadable.
+    severity: low
+    applies_if: *nc
+    probe:
+      <<: *nccontent
+      regex: '[''"]datadirectory[''"]\s*=>\s*[''"][^''"]*/nextcloud/data/?[''"]'
+    expect: [match eq false]
+    remediation: Move the data directory outside the web root (occ maintenance mode, move, update datadirectory).
+    references: [https://docs.nextcloud.com/server/latest/admin_manual/installation/harden_server.html#place-data-directory-outside-of-the-web-root]
+    tests:
+      pass: {files: {/var/www/nextcloud/config/config.php: "<?php\n$CONFIG = array (\n  'datadirectory' => '/srv/nextcloud-data',\n);\n"}}
+      fail: {files: {/var/www/nextcloud/config/config.php: "<?php\n$CONFIG = array (\n  'datadirectory' => '/var/www/nextcloud/data',\n);\n"}}
+
+  # ---- Drupal / Joomla / Magento ------------------------------------------------
+  - id: drupal:settings-writable
+    title: "Drupal settings.php writable by group or others: {path}"
+    description: settings.php is executed on every request; Drupal's status report requires it to be read-only.
+    severity: high
+    applies_if: &drupal {file: [/var/www/*/sites/default/settings.php, /var/www/*/*/sites/default/settings.php, /srv/www/*/sites/default/settings.php]}
+    probe: &drupalcfg {type: file, path: [/var/www/*/sites/default/settings.php, /var/www/*/*/sites/default/settings.php, /srv/www/*/sites/default/settings.php]}
+    expect: [mode bits_none 0022]
+    remediation: chmod 444 settings.php (and 555 on sites/default).
+    fix: chmod 444 {path}
+    references: [https://www.drupal.org/docs/administering-a-drupal-site/security-in-drupal/securing-file-permissions-and-ownership]
+    tests:
+      pass: {files: {/var/www/site/web/sites/default/settings.php: "<?php\n"}, meta: {/var/www/site/web/sites/default/settings.php: "0440 0 33"}}
+      fail: {files: {/var/www/site/web/sites/default/settings.php: "<?php\n"}, meta: {/var/www/site/web/sites/default/settings.php: "0666 33 33"}}
+
+  - id: drupal:settings-world-readable
+    title: "Drupal settings.php readable by any local user: {path}"
+    description: settings.php contains the database credentials and hash_salt.
+    severity: high
+    applies_if: *drupal
+    probe: *drupalcfg
+    expect: [mode bits_none 0004]
+    remediation: Make settings.php readable only by root/owner and the PHP group.
+    fix: chmod 440 {path}
+    references: [https://www.drupal.org/docs/administering-a-drupal-site/security-in-drupal/securing-file-permissions-and-ownership]
+    tests:
+      pass: {files: {/var/www/site/sites/default/settings.php: "<?php\n"}, meta: {/var/www/site/sites/default/settings.php: "0440 0 33"}}
+      fail: {files: {/var/www/site/sites/default/settings.php: "<?php\n"}, meta: {/var/www/site/sites/default/settings.php: "0444 0 0"}}
+
+  - id: joomla:config-world-readable
+    title: "Joomla configuration.php readable by any local user: {path}"
+    description: configuration.php holds the database password and the site secret.
+    severity: high
+    applies_if: {all: [{file: [/var/www/*/configuration.php, /var/www/*/*/configuration.php]}, {file: [/var/www/*/administrator/manifests, /var/www/*/*/administrator/manifests]}]}
+    probe: {type: file, path: [/var/www/*/configuration.php, /var/www/*/*/configuration.php]}
+    expect: [mode bits_none 0004]
+    remediation: chmod 640 configuration.php (Joomla's Global Configuration can also make it unwritable).
+    fix: chmod 640 {path}
+    references: [https://docs.joomla.org/Security_Checklist/Hosting_and_Server_Setup]
+    tests:
+      pass: {files: {/var/www/j/configuration.php: "<?php\n", /var/www/j/administrator/manifests/files/joomla.xml: ""}, meta: {/var/www/j/configuration.php: "0640 33 33"}}
+      fail: {files: {/var/www/j/configuration.php: "<?php\n", /var/www/j/administrator/manifests/files/joomla.xml: ""}, meta: {/var/www/j/configuration.php: "0644 33 33"}}
+      na: {files: {/var/www/j/configuration.php: "<?php\n"}}
+
+  - id: magento:env-world-readable
+    title: "Magento app/etc/env.php readable by any local user: {path}"
+    description: env.php holds the database password and the crypt key that protects stored payment and customer data.
+    severity: high
+    applies_if: {file: [/var/www/*/app/etc/env.php, /var/www/*/*/app/etc/env.php]}
+    probe: {type: file, path: [/var/www/*/app/etc/env.php, /var/www/*/*/app/etc/env.php]}
+    expect: [mode bits_none 0004]
+    remediation: "chmod 640 app/etc/env.php (owner: file system owner, group: web server)."
+    fix: chmod 640 {path}
+    references: [https://experienceleague.adobe.com/en/docs/commerce-operations/installation-guide/prerequisites/file-system/configure-permissions]
+    tests:
+      pass: {files: {/var/www/shop/app/etc/env.php: "<?php\n"}, meta: {/var/www/shop/app/etc/env.php: "0640 1000 33"}}
+      fail: {files: {/var/www/shop/app/etc/env.php: "<?php\n"}, meta: {/var/www/shop/app/etc/env.php: "0664 1000 33"}}
+
+  # ---- tools ------------------------------------------------------------------
+  - id: composer:auth-world-readable
+    title: "Composer auth.json readable by any local user: {path}"
+    description: auth.json holds tokens for GitHub, GitLab and private Packagist/Magento repositories.
+    severity: medium
+    applies_if: &composer {file: [/root/.composer/auth.json, /root/.config/composer/auth.json, /home/*/.composer/auth.json, /home/*/.config/composer/auth.json, /var/www/*/auth.json, /var/www/*/*/auth.json]}
+    probe: {type: file, path: [/root/.composer/auth.json, /root/.config/composer/auth.json, /home/*/.composer/auth.json, /home/*/.config/composer/auth.json, /var/www/*/auth.json, /var/www/*/*/auth.json]}
+    expect: [mode bits_none 0004]
+    remediation: chmod 600 auth.json and rotate the tokens if other users could read it; never keep it inside a web root.
+    fix: chmod 600 {path}
+    references: [https://getcomposer.org/doc/articles/authentication-for-private-packages.md]
+    tests:
+      pass: {files: {/var/www/app/auth.json: "{}\n"}, meta: {/var/www/app/auth.json: "0600 1000 1000"}}
+      fail: {files: {/var/www/app/auth.json: "{}\n"}, meta: {/var/www/app/auth.json: "0644 1000 1000"}}
+
+  - id: adminer:present
+    title: "Adminer database console in a web directory: {path}"
+    description: adminer.php is a single-file database admin UI; left in a web root it exposes database login (and has had SSRF/file-read bugs such as CVE-2021-21311).
+    severity: high
+    applies_if: {file: [/var/www, /srv/www, /usr/share/nginx/html]}
+    probe: {type: walk, roots: [/var/www, /srv/www, /usr/share/nginx/html], match: ["adminer*.php"], file_type: file, max_depth: 4, prune: [node_modules, vendor, .git]}
+    expect_none: true
+    remediation: Remove it, or protect it with web-server authentication and an IP allowlist.
+    fix: rm {path}
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2021-21311]
+    tests:
+      pass: {files: {/var/www/html/index.php: "<?php\n"}}
+      fail: {files: {/var/www/html/adminer-4.8.1.php: "<?php\n"}}
+
+  - id: phpmyadmin:allow-no-password
+    title: phpMyAdmin allows logins without a password
+    description: AllowNoPassword true lets anyone reaching phpMyAdmin log in to database accounts that have no password.
+    severity: high
+    applies_if: &pma {file: [/etc/phpmyadmin/config.inc.php, /etc/phpMyAdmin/config.inc.php, /usr/share/phpmyadmin/config.inc.php, /var/www/*/phpmyadmin/config.inc.php, /var/www/phpmyadmin/config.inc.php]}
+    probe: &pmacontent
+      type: content
+      path: [/etc/phpmyadmin/config.inc.php, /etc/phpMyAdmin/config.inc.php, /usr/share/phpmyadmin/config.inc.php, /var/www/*/phpmyadmin/config.inc.php, /var/www/phpmyadmin/config.inc.php]
+      regex: '^\s*\$cfg\[''Servers''\]\[\$i\]\[''AllowNoPassword''\]\s*=\s*(true|TRUE|1)'
+    expect: [match eq false]
+    remediation: "Set $cfg['Servers'][$i]['AllowNoPassword'] = false; and give every database account a password."
+    references: [https://docs.phpmyadmin.net/en/latest/config.html#cfg_Servers_AllowNoPassword]
+    tests:
+      pass: {files: {/etc/phpmyadmin/config.inc.php: "<?php\n$cfg['Servers'][$i]['AllowNoPassword'] = false;\n"}}
+      fail: {files: {/etc/phpmyadmin/config.inc.php: "<?php\n$cfg['Servers'][$i]['AllowNoPassword'] = TRUE;\n"}}
+      na: {}
+
+  - id: phpmyadmin:auth-type-config
+    title: phpMyAdmin logs everyone in automatically (auth_type config)
+    description: With auth_type 'config' phpMyAdmin uses stored credentials for every visitor, so anyone who reaches it has full database access.
+    severity: critical
+    applies_if: *pma
+    probe:
+      <<: *pmacontent
+      regex: '^\s*\$cfg\[''Servers''\]\[\$i\]\[''auth_type''\]\s*=\s*[''"]config[''"]'
+    expect: [match eq false]
+    remediation: Use auth_type 'cookie' (or 'http') and restrict phpMyAdmin to an admin network.
+    references: [https://docs.phpmyadmin.net/en/latest/setup.html#config-authentication-mode]
+    tests:
+      pass: {files: {/etc/phpmyadmin/config.inc.php: "<?php\n$cfg['Servers'][$i]['auth_type'] = 'cookie';\n"}}
+      fail: {files: {/etc/phpmyadmin/config.inc.php: "<?php\n$cfg['Servers'][$i]['auth_type'] = 'config';\n"}}

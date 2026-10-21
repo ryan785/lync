@@ -1,0 +1,251 @@
+pack: tls
+title: TLS certificates and private keys
+description: Certificates and private keys referenced by nginx (ssl_certificate), Apache (SSLCertificateFile), Postfix (smtpd_tls_*) and Dovecot (ssl_cert/ssl_key). nginx expiry is reported by the original tls:cert-expiry check, so the expiry checks here cover the other services.
+category: tls
+references:
+  - https://ssl-config.mozilla.org/
+test_base:
+  os: debian:12
+  files:
+    /etc/ssl/lync/good.pem: |
+      -----BEGIN CERTIFICATE-----
+      MIIC9jCCAd6gAwIBAgIIGOB8dDtUnzwwDQYJKoZIhvcNAQELBQAwFzEVMBMGA1UE
+      AxMMTHluYyBUZXN0IENBMB4XDTI2MDEwMTAwMDAwMFoXDTI4MDEwMTAwMDAwMFow
+      HDEaMBgGA1UEAxMRZ29vZC5leGFtcGxlLnRlc3QwggEiMA0GCSqGSIb3DQEBAQUA
+      A4IBDwAwggEKAoIBAQCl7Tox5nZlO8+oIhvx3sGO/CkH+qZN4O5D4G8/NyF6uuoa
+      mSsENdiVgqO+9B4teYdgSxhjEOH26feUILETPt3QbNVQLYikEcFZL1mkRbp7Ntkl
+      oPL3t47xCbbT+zw4J587zHotNoX430EC27gcUpiWg0keFqUeZs5d+7QHTfV2vZZ0
+      axhkuhINevaJnFmoAjwg1fuwQZ3zTcX9UaLNtcPBgFb0FNNXFePPZMv0Ai+MrYeb
+      BIrVoVoEms5mghtaFhRGqmJ762JXHpzuFYmpOkn5GfOCvftGL7hjpNQ4DTaoS9Jj
+      kcPuJtuSnl1tAOfNxZrLDx5HVGPBMno1+MUvoV2BAgMBAAGjQTA/MB8GA1UdIwQY
+      MBaAFCr1D8IOPhfOn6P07b6PByZNjDRlMBwGA1UdEQQVMBOCEWdvb2QuZXhhbXBs
+      ZS50ZXN0MA0GCSqGSIb3DQEBCwUAA4IBAQAzKDeATPc4FET1HFuPtaF4raKrxBN+
+      a3Rkkcw7iwA5frxA5Qh/aA/XwKkH84nph3+imVry3QbCTiEjXi5pifPTrqkTDunn
+      Bw1v/NZDWSt8dJkIZRcNB0/SDo6SAiuH2mcrwuQJV8RyApjNClczTu4AZVbNJMIG
+      8DV6L+pJUUKVCYEm0/5qYIxSk7QiJIncCV4chLEK5Lqrjv3xq0m7MkeiDXfHLNRz
+      zZa/al0Y6EYWm+WuVgpV+rdtJHCCHyRECFEAD6nDBMXrXEtcRun+2WAQi+kKDtvd
+      KW5ONkj5wagb00iviJPNi6GnUGVjvkBOHoNUJRIAhm8JZMuSFvH5l2DC
+      -----END CERTIFICATE-----
+    /etc/ssl/lync/self.pem: |
+      -----BEGIN CERTIFICATE-----
+      MIIC2jCCAcKgAwIBAgIIGOB8dDtpUawwDQYJKoZIhvcNAQELBQAwHDEaMBgGA1UE
+      AxMRc2VsZi5leGFtcGxlLnRlc3QwHhcNMjYwMTAxMDAwMDAwWhcNMjgwMTAxMDAw
+      MDAwWjAcMRowGAYDVQQDExFzZWxmLmV4YW1wbGUudGVzdDCCASIwDQYJKoZIhvcN
+      AQEBBQADggEPADCCAQoCggEBAKXtOjHmdmU7z6giG/HewY78KQf6pk3g7kPgbz83
+      IXq66hqZKwQ12JWCo770Hi15h2BLGGMQ4fbp95QgsRM+3dBs1VAtiKQRwVkvWaRF
+      uns22SWg8ve3jvEJttP7PDgnnzvMei02hfjfQQLbuBxSmJaDSR4WpR5mzl37tAdN
+      9Xa9lnRrGGS6Eg169omcWagCPCDV+7BBnfNNxf1Ros21w8GAVvQU01cV489ky/QC
+      L4yth5sEitWhWgSazmaCG1oWFEaqYnvrYlcenO4Viak6SfkZ84K9+0YvuGOk1DgN
+      NqhL0mORw+4m25KeXW0A583FmssPHkdUY8EyejX4xS+hXYECAwEAAaMgMB4wHAYD
+      VR0RBBUwE4IRc2VsZi5leGFtcGxlLnRlc3QwDQYJKoZIhvcNAQELBQADggEBAGUz
+      4sV85pKSDEN5KGyFKBrTAzCGeJBfpxcNYc/FuKoqX1gkKaYHlf4MoX4AXpnv+jca
+      EkR6xyD9POvE54NHIWvAaeBirm4Pz76F57JzMrNTfdFZo+hpjiKTcf+ovvG9OJ5T
+      BWP/5NeuBDjCfRiWwzI+E3/99HosNfavfNOkkhHh425NqPzbcuEUveJddDBXgRIG
+      lEutLKk1312i6fsfW4Wfpsj7TYwrvh+lzj/qiXEPhwg/04xDpNoy8CMXDITXb0TK
+      ZIdO7ivgT0zav3U0zoTdglQzmVXI75qpleMMjDxaHRVHIrHMJq3xdsX9g80T2aqz
+      24U65gD7XKcG9I9dq0g=
+      -----END CERTIFICATE-----
+    /etc/ssl/lync/expired.pem: |
+      -----BEGIN CERTIFICATE-----
+      MIIC/DCCAeSgAwIBAgIIGOB8dDtpUawwDQYJKoZIhvcNAQELBQAwFzEVMBMGA1UE
+      AxMMTHluYyBUZXN0IENBMB4XDTI1MDEwMTAwMDAwMFoXDTI2MDkwMTAwMDAwMFow
+      HzEdMBsGA1UEAxMUZXhwaXJlZC5leGFtcGxlLnRlc3QwggEiMA0GCSqGSIb3DQEB
+      AQUAA4IBDwAwggEKAoIBAQCl7Tox5nZlO8+oIhvx3sGO/CkH+qZN4O5D4G8/NyF6
+      uuoamSsENdiVgqO+9B4teYdgSxhjEOH26feUILETPt3QbNVQLYikEcFZL1mkRbp7
+      NtkloPL3t47xCbbT+zw4J587zHotNoX430EC27gcUpiWg0keFqUeZs5d+7QHTfV2
+      vZZ0axhkuhINevaJnFmoAjwg1fuwQZ3zTcX9UaLNtcPBgFb0FNNXFePPZMv0Ai+M
+      rYebBIrVoVoEms5mghtaFhRGqmJ762JXHpzuFYmpOkn5GfOCvftGL7hjpNQ4DTao
+      S9JjkcPuJtuSnl1tAOfNxZrLDx5HVGPBMno1+MUvoV2BAgMBAAGjRDBCMB8GA1Ud
+      IwQYMBaAFCr1D8IOPhfOn6P07b6PByZNjDRlMB8GA1UdEQQYMBaCFGV4cGlyZWQu
+      ZXhhbXBsZS50ZXN0MA0GCSqGSIb3DQEBCwUAA4IBAQCMQJ1dJh1JYRC9RHgFSmFJ
+      hInxfQFK++iBqsrmvYiw5kQsUke2NbmnX1nVI0F9JrchUA8/+I9NPhRjDKfm5HNG
+      kDE9Dh6csIB2i4pj+9GPAY2MJGD9JBDdqvuGkXLrFS8Hoso58hnbwtOVQPJgPO8I
+      0c8kvMZkb4HDAMmuNxFmDMmYADT+bb670D9Hx1jMSiRhs7JPXXPzRYDKxtHfaHcz
+      XAu/FAQQvO7wUbYWNaPjDjA+ttGTtA//YQ8gx9a0fxVeUI49nxQN0uJ/jjrb47On
+      mcaJMFrjgxPblPx0BgYWi8hdWdR03tGU4LRPjiclXh4RbiKmiSe/LYgpAJvZcxel
+      -----END CERTIFICATE-----
+    /etc/ssl/lync/soon.pem: |
+      -----BEGIN CERTIFICATE-----
+      MIIC9jCCAd6gAwIBAgIIGOB8dDt4tYQwDQYJKoZIhvcNAQELBQAwFzEVMBMGA1UE
+      AxMMTHluYyBUZXN0IENBMB4XDTI2MDEwMTAwMDAwMFoXDTI2MTAzMDAwMDAwMFow
+      HDEaMBgGA1UEAxMRc29vbi5leGFtcGxlLnRlc3QwggEiMA0GCSqGSIb3DQEBAQUA
+      A4IBDwAwggEKAoIBAQCl7Tox5nZlO8+oIhvx3sGO/CkH+qZN4O5D4G8/NyF6uuoa
+      mSsENdiVgqO+9B4teYdgSxhjEOH26feUILETPt3QbNVQLYikEcFZL1mkRbp7Ntkl
+      oPL3t47xCbbT+zw4J587zHotNoX430EC27gcUpiWg0keFqUeZs5d+7QHTfV2vZZ0
+      axhkuhINevaJnFmoAjwg1fuwQZ3zTcX9UaLNtcPBgFb0FNNXFePPZMv0Ai+MrYeb
+      BIrVoVoEms5mghtaFhRGqmJ762JXHpzuFYmpOkn5GfOCvftGL7hjpNQ4DTaoS9Jj
+      kcPuJtuSnl1tAOfNxZrLDx5HVGPBMno1+MUvoV2BAgMBAAGjQTA/MB8GA1UdIwQY
+      MBaAFCr1D8IOPhfOn6P07b6PByZNjDRlMBwGA1UdEQQVMBOCEXNvb24uZXhhbXBs
+      ZS50ZXN0MA0GCSqGSIb3DQEBCwUAA4IBAQBcgMGBpGB0WRVNiZWstY08h6JHBtC3
+      28JJMOtmytCLaDIiceQPZPBmLtePegXTSOh6nPrthu+EB/y+S3s0YbRZgXNcMTZb
+      6UFvEgthlzqNiuKhmc6k3yAjgClyINbO163SKpeF7l4hbCfLLGzHAMNqCFVfnQD2
+      b3AsKQIgMjmL3aSuH08h8UQt+aKKceYzvD9UwPDV1hxqgejg0Etu1tmTZ22qiLYC
+      OQKaovRE6n4QwUz5L9O2S9pRAy0IxS8wBVs710uXO6zciZvgeJpAv/k+kaUT7XH7
+      4vQOPxI4lAu4YBi3lfk/Cu6plezSPNX7VlpOKkEc9kS007rCGkrLzYvM
+      -----END CERTIFICATE-----
+    /etc/ssl/lync/rsa1024.pem: |
+      -----BEGIN CERTIFICATE-----
+      MIIB1TCCAT6gAwIBAgIIGOB8dDt4tYQwDQYJKoZIhvcNAQELBQAwHDEaMBgGA1UE
+      AxMRd2Vhay5leGFtcGxlLnRlc3QwHhcNMjYwMTAxMDAwMDAwWhcNMjgwMTAxMDAw
+      MDAwWjAcMRowGAYDVQQDExF3ZWFrLmV4YW1wbGUudGVzdDCBnzANBgkqhkiG9w0B
+      AQEFAAOBjQAwgYkCgYEAxOcoOo/MeuWvwzaNZ1g384pJt+7fRBQudodezC8dPkwa
+      Y77VbHUEJY27w2zHb2TaZIyGjc7EYeoLCGe82sXQsChO7/oyXj9qSu7vg/2gH0t7
+      /J4vqYMafoj45DiDW8P3U/sm1ZKROTgU5JYnjNLQm1B39aoaySeMHszt8L23w5kC
+      AwEAAaMgMB4wHAYDVR0RBBUwE4IRd2Vhay5leGFtcGxlLnRlc3QwDQYJKoZIhvcN
+      AQELBQADgYEADt6yjmQmIYyOnFBbKXXLrOIbZeZ7OTis0zWi0tsZCQBS49oFaDYh
+      OekloPd1coAiZ9/qKNK20aEgcZlHh0YhoXGwqnKStRB1iMARfsqp/dHFwIXMhP74
+      r39cCz8suhAsZZwbM9U6Er66VctAzQ3EBb1zsEpbSUopaK0icOdjLqQ=
+      -----END CERTIFICATE-----
+    /etc/ssl/lync/sha1.pem: |
+      -----BEGIN CERTIFICATE-----
+      MIIC9jCCAd6gAwIBAgIIGOB8dDuPoqgwDQYJKoZIhvcNAQEFBQAwFzEVMBMGA1UE
+      AxMMTHluYyBUZXN0IENBMB4XDTI2MDEwMTAwMDAwMFoXDTI4MDEwMTAwMDAwMFow
+      HDEaMBgGA1UEAxMRc2hhMS5leGFtcGxlLnRlc3QwggEiMA0GCSqGSIb3DQEBAQUA
+      A4IBDwAwggEKAoIBAQCl7Tox5nZlO8+oIhvx3sGO/CkH+qZN4O5D4G8/NyF6uuoa
+      mSsENdiVgqO+9B4teYdgSxhjEOH26feUILETPt3QbNVQLYikEcFZL1mkRbp7Ntkl
+      oPL3t47xCbbT+zw4J587zHotNoX430EC27gcUpiWg0keFqUeZs5d+7QHTfV2vZZ0
+      axhkuhINevaJnFmoAjwg1fuwQZ3zTcX9UaLNtcPBgFb0FNNXFePPZMv0Ai+MrYeb
+      BIrVoVoEms5mghtaFhRGqmJ762JXHpzuFYmpOkn5GfOCvftGL7hjpNQ4DTaoS9Jj
+      kcPuJtuSnl1tAOfNxZrLDx5HVGPBMno1+MUvoV2BAgMBAAGjQTA/MB8GA1UdIwQY
+      MBaAFCr1D8IOPhfOn6P07b6PByZNjDRlMBwGA1UdEQQVMBOCEXNoYTEuZXhhbXBs
+      ZS50ZXN0MA0GCSqGSIb3DQEBBQUAA4IBAQB25mWQOMqQzu3D3iTSU3NtZvGMlRRl
+      Rw/axoxLfTCOGhJgIAcXoiGciNEuRmCZ5P3QD1Ca1Qco/Dac9jOPCBRtpnhfufPw
+      Xl9z8/739iCG+rlXp6parYMSxnxeK5R8hyZCayI8Jitg9AtO+K4EZazne1WLMWSW
+      /kBaoXyEKM5qRdSIPGnlRjgDHAWzGuC4JepwIfjeyDGRI/UvKchTm5sHrApMI8XT
+      izb0PSbTeJeNEoJNEpw2pq/P2QVxFvb3qwi0N3CBH64n/yYPdPzB/M7Ddqaj5d6E
+      I2u47MYlddmQvrmqWxJqirJWA08fKI5J3kTBejvKsGeAMBsvmZgwa/+3
+      -----END CERTIFICATE-----
+    /etc/ssl/lync/ec.pem: |
+      -----BEGIN CERTIFICATE-----
+      MIIBSDCB7qADAgECAggY4Hx0O57zXDAKBggqhkjOPQQDAjAaMRgwFgYDVQQDEw9l
+      Yy5leGFtcGxlLnRlc3QwHhcNMjYwMTAxMDAwMDAwWhcNMjgwMTAxMDAwMDAwWjAa
+      MRgwFgYDVQQDEw9lYy5leGFtcGxlLnRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMB
+      BwNCAAR+dwYxyf0Mi1ZpVOvXZxCKYA83U+2vPf9Cn/jPQBuwpldBbmaLhLQdjeOW
+      lcMBamSQopUGfhroQ3OohyICouyqox4wHDAaBgNVHREEEzARgg9lYy5leGFtcGxl
+      LnRlc3QwCgYIKoZIzj0EAwIDSQAwRgIhAOSZNspxwRNb7nGheLxpnxiHO24B0BDx
+      TpOA/6H44utdAiEA/9o7GFaL1+2WCAT8qyeE554Uy/sheIE4y5AQoZatDPc=
+      -----END CERTIFICATE-----
+checks:
+  - id: tls:expired
+    title: "TLS certificate expired: {path}"
+    description: An expired certificate used by Apache, Postfix or Dovecot breaks clients and trains users (and MTAs) to accept certificate errors.
+    severity: high
+    probe: {type: x509, from: [apache, postfix, dovecot]}
+    expect: [expired eq false]
+    evidence: "{path}: {subject} expired on {not_after}"
+    remediation: Renew the certificate and reload the service; automate renewal (certbot/acme.sh timers).
+    references: [https://letsencrypt.org/docs/]
+    tests:
+      pass: {files: {/etc/postfix/main.cf: "smtpd_tls_cert_file = /etc/ssl/lync/good.pem\n"}}
+      fail: {files: {/etc/postfix/main.cf: "smtpd_tls_cert_file = /etc/ssl/lync/expired.pem\n"}}
+
+  - id: tls:expiring-soon
+    title: "TLS certificate expires within 21 days: {path}"
+    description: A certificate used by Apache, Postfix or Dovecot expires within three weeks; automated renewal is probably not working.
+    severity: medium
+    probe: {type: x509, from: [apache, postfix, dovecot]}
+    where: [expired eq false]
+    expect: [days_left ge 21]
+    evidence: "{path}: {subject} expires on {not_after} ({days_left} days)"
+    remediation: Renew the certificate and check the renewal timer/cron job.
+    references: [https://letsencrypt.org/docs/integration-guide/#when-to-renew]
+    tests:
+      pass: {files: {/etc/dovecot/conf.d/10-ssl.conf: "ssl_cert = </etc/ssl/lync/good.pem\n"}}
+      fail: {files: {/etc/dovecot/conf.d/10-ssl.conf: "ssl_cert = </etc/ssl/lync/soon.pem\n"}}
+
+  - id: tls:weak-rsa-key
+    title: "TLS certificate uses an RSA key shorter than 2048 bits: {path}"
+    description: RSA keys below 2048 bits are within reach of well-funded attackers and rejected by current clients.
+    severity: high
+    probe: {type: x509, from: [nginx, apache, postfix, dovecot]}
+    where: [key_type eq rsa]
+    expect: [key_bits ge 2048]
+    evidence: "{path}: RSA {key_bits} bits"
+    remediation: Issue a new certificate with an RSA 2048+/3072 or ECDSA P-256 key.
+    references: [https://csrc.nist.gov/publications/detail/sp/800-131a/rev-2/final]
+    tests:
+      pass: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { listen 443 ssl; ssl_certificate /etc/ssl/lync/good.pem; } }\n"}}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { listen 443 ssl; ssl_certificate /etc/ssl/lync/rsa1024.pem; } }\n"}}
+
+  - id: tls:weak-signature
+    title: "TLS certificate signed with SHA-1 or MD5: {path}"
+    description: SHA-1 and MD5 certificate signatures are forgeable (chosen-prefix collisions) and rejected by modern clients.
+    severity: medium
+    probe: {type: x509, from: [nginx, apache, postfix, dovecot]}
+    expect: ['sig_alg not_regex (?i)(md5|sha1)']
+    severity_if:
+      - {when: 'sig_alg regex (?i)md5', severity: high}
+    evidence: "{path}: signature algorithm {sig_alg}"
+    remediation: Reissue the certificate with a SHA-256 (or better) signature.
+    references: [https://shattered.io/]
+    tests:
+      pass: {files: {/etc/postfix/main.cf: "smtpd_tls_cert_file = /etc/ssl/lync/ec.pem\n"}}
+      fail: {files: {/etc/postfix/main.cf: "smtpd_tls_cert_file = /etc/ssl/lync/sha1.pem\n"}}
+
+  - id: tls:self-signed
+    title: "Web server uses a self-signed certificate: {path}"
+    description: Visitors cannot verify a self-signed certificate, so they learn to click through warnings and can be intercepted.
+    severity: low
+    level: strict
+    probe: {type: x509, from: [nginx, apache]}
+    expect: [self_signed eq false]
+    evidence: "{path}: self-signed ({subject})"
+    remediation: Use a certificate from a public CA (e.g. Let's Encrypt) or your internal CA.
+    references: [https://letsencrypt.org/getting-started/]
+    tests:
+      pass: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { listen 443 ssl; ssl_certificate /etc/ssl/lync/good.pem; } }\n"}}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { listen 443 ssl; ssl_certificate /etc/ssl/lync/self.pem; } }\n"}}
+
+  - id: tls:key-world-readable
+    title: "TLS private key readable by any user: {path}"
+    description: Any local user can copy a world-readable private key and impersonate the service or decrypt captured traffic (non-PFS suites).
+    severity: high
+    level: basic
+    probe: {type: file, from: [nginx-key, apache-key, postfix-key, dovecot-key]}
+    expect: [mode bits_none 0004]
+    remediation: Make the key readable only by root (and the service group if it reads keys after dropping privileges); then rotate it.
+    fix: chmod 600 {path}
+    references: [https://www.openssl.org/docs/manmaster/man1/openssl-genpkey.html]
+    tests:
+      pass: {files: {/etc/postfix/main.cf: "smtpd_tls_key_file = /etc/ssl/private/mail.key\n", /etc/ssl/private/mail.key: "placeholder\n"}, meta: {/etc/ssl/private/mail.key: "0600 0 0"}}
+      fail: {files: {/etc/postfix/main.cf: "smtpd_tls_key_file = /etc/ssl/private/mail.key\n", /etc/ssl/private/mail.key: "placeholder\n"}, meta: {/etc/ssl/private/mail.key: "0644 0 0"}}
+
+  - id: tls:key-writable
+    title: "TLS private key writable by group or others: {path}"
+    description: Someone who can replace the key (and certificate) can make the service present an attacker-controlled identity.
+    severity: high
+    probe: {type: file, from: [nginx-key, apache-key, postfix-key, dovecot-key]}
+    expect: [mode bits_none 0022]
+    remediation: Remove group/other write permission from the key.
+    fix: chmod go-w {path}
+    references: [https://ssl-config.mozilla.org/]
+    tests:
+      pass: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { ssl_certificate_key /etc/ssl/private/web.key; } }\n", /etc/ssl/private/web.key: "placeholder\n"}, meta: {/etc/ssl/private/web.key: "0640 0 0"}}
+      fail: {files: {/etc/nginx/nginx.conf: "events {}\nhttp { server { ssl_certificate_key /etc/ssl/private/web.key; } }\n", /etc/ssl/private/web.key: "placeholder\n"}, meta: {/etc/ssl/private/web.key: "0660 0 33"}}
+
+  - id: tls:key-not-root-owned
+    title: "TLS private key not owned by root: {path}"
+    description: Keys owned by a service account can be read or replaced by anyone who compromises that service.
+    severity: low
+    level: strict
+    probe: {type: file, from: [nginx-key, apache-key, postfix-key, dovecot-key]}
+    expect: [uid eq 0]
+    remediation: chown root:root (or root:ssl-cert) and grant read access through the group only.
+    fix: chown root {path}
+    references: [https://ssl-config.mozilla.org/]
+    tests:
+      pass: {files: {/etc/postfix/main.cf: "smtpd_tls_key_file = /etc/ssl/private/mail.key\n", /etc/ssl/private/mail.key: "placeholder\n"}, meta: {/etc/ssl/private/mail.key: "0600 0 0"}}
+      fail: {files: {/etc/postfix/main.cf: "smtpd_tls_key_file = /etc/ssl/private/mail.key\n", /etc/ssl/private/mail.key: "placeholder\n"}, meta: {/etc/ssl/private/mail.key: "0600 33 33"}}
+
+  - id: tls:letsencrypt-dir-perms
+    title: "Let's Encrypt key directory accessible to other users: {path}"
+    description: Certbot creates /etc/letsencrypt/archive and live as 0700; opening them lets local users read every issued private key (older certbot versions create the key files themselves 0644).
+    severity: high
+    probe: {type: file, path: [/etc/letsencrypt/archive, /etc/letsencrypt/live], no_follow: true}
+    expect: [mode bits_none 0005]
+    remediation: Restore the directory permissions.
+    fix: chmod 700 {path}
+    references: [https://eff-certbot.readthedocs.io/en/stable/using.html#where-are-my-certificates]
+    tests:
+      pass: {meta: {/etc/letsencrypt/archive: "d0700 0 0", /etc/letsencrypt/live: "d0700 0 0"}}
+      fail: {meta: {/etc/letsencrypt/archive: "d0755 0 0", /etc/letsencrypt/live: "d0700 0 0"}}

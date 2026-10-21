@@ -1,0 +1,160 @@
+pack: php-fpm
+title: PHP-FPM pools
+description: PHP-FPM pool definitions (one result per pool) and the FastCGI sockets they create. An exposed FastCGI port or a world-writable socket lets anyone run PHP code as the pool user.
+category: config
+applies_if:
+  file: [/etc/php-fpm.d, /etc/php-fpm.conf, /etc/php/*/fpm, /etc/opt/remi/php*/php-fpm.d, /etc/php*/php-fpm.d]
+references:
+  - https://www.php.net/manual/en/install.fpm.configuration.php
+test_base:
+  os: rocky:9.4
+  packages: {php-fpm: "8.1.27-1.el9"}
+  files:
+    /etc/php-fpm.d/www.conf: |
+      [www]
+      user = apache
+      group = apache
+      listen = /run/php-fpm/www.sock
+      listen.acl_users = apache,nginx
+      pm = dynamic
+checks:
+  - id: php-fpm:pool-root
+    title: PHP-FPM pool runs as root
+    description: Every PHP script in a pool running as root executes with full host privileges; one vulnerable plugin is a full compromise.
+    severity: critical
+    level: basic
+    probe: {type: config, format: phpfpm, key: user, default: ""}
+    expect: ["value not_in root,0"]
+    remediation: Set user/group in the pool to a dedicated unprivileged account and restart php-fpm.
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php#user]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php-fpm.d/www.conf: "[www]\nuser = root\ngroup = root\nlisten = /run/php-fpm/www.sock\n"}}
+      na: {files: {/etc/php-fpm.d/www.conf: "!absent"}}
+
+  - id: php-fpm:pool-group-root
+    title: PHP-FPM pool runs with group root
+    description: A pool whose group is root can read and write every root-group file (many configs and logs).
+    severity: medium
+    probe: {type: config, format: phpfpm, key: group, default: ""}
+    expect: ["value not_in root,0"]
+    remediation: Set group to the pool's own unprivileged group.
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php#group]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\ngroup = root\nlisten = /run/php-fpm/www.sock\n"}}
+
+  - id: php-fpm:listen-exposed
+    title: PHP-FPM FastCGI port reachable from the network
+    description: "FastCGI has no authentication: anyone who can reach the port can set PHP_VALUE auto_prepend_file=php://input and run arbitrary code as the pool user. A bare port (listen = 9000) binds every interface."
+    severity: critical
+    level: basic
+    probe: {type: config, format: phpfpm, key: listen, keys: [listen.allowed_clients], default: /}
+    expect: ['value regex ^/ || value regex ^(127\.|\[::1\]|localhost)']
+    severity_if:
+      - {when: listen.allowed_clients not_empty, severity: high}
+    remediation: Listen on a Unix socket or 127.0.0.1:9000, and firewall the port.
+    fix: sed -i 's|^listen = .*|listen = 127.0.0.1:9000|' <pool file> && systemctl restart php-fpm
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php#listen, https://book.hacktricks.xyz/network-services-pentesting/9000-pentesting-fastcgi]
+    tests:
+      pass:
+        - {}
+        - files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = 127.0.0.1:9000\n"}
+      fail:
+        - files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = 9000\n"}
+        - files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = 0.0.0.0:9000\nlisten.allowed_clients = 10.0.0.5\n"}
+          severity: high
+
+  - id: php-fpm:listen-mode
+    title: PHP-FPM socket permissions allow any local user
+    description: A FastCGI socket with mode 0666/0777 lets every local user run PHP as the pool user (and read everything that user can).
+    severity: high
+    probe: {type: config, format: phpfpm, key: listen.mode, keys: [listen], default: "0660"}
+    where: [listen regex ^/]
+    expect: [value perm_max 0660]
+    remediation: Set listen.mode = 0660 with listen.owner/listen.group (or listen.acl_users) limited to the web server.
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php#listen-mode]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = /run/php-fpm/www.sock\nlisten.mode = 0666\n"}}
+
+  - id: php-fpm:socket-world-writable
+    title: PHP-FPM socket writable by any local user
+    description: The live socket file is writable by others, so any local user can send FastCGI requests and execute PHP as the pool user.
+    severity: high
+    probe: {type: file, path: [/run/php/*.sock, /run/php-fpm/*.sock, /run/php*/*.sock, /var/opt/remi/php*/run/php-fpm/*.sock]}
+    expect: [mode bits_none 0002]
+    remediation: Fix listen.mode/listen.owner in the pool and restart php-fpm.
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php#listen-mode]
+    tests:
+      pass: {meta: {/run/php-fpm/www.sock: "s0660 0 0"}}
+      fail: {meta: {/run/php-fpm/www.sock: "s0666 0 0"}}
+
+  - id: php-fpm:limit-extensions
+    title: PHP-FPM executes non-.php files as PHP
+    description: security.limit_extensions controls which files FPM will execute. Allowing .html, .jpg or similar (or leaving it empty) means an uploaded image with PHP inside becomes code execution.
+    severity: high
+    probe: {type: config, format: phpfpm, key: security.limit_extensions, default: .php .phar}
+    expect: [value not_empty, 'value not_regex (?i)\.(html?|jpe?g|png|gif|txt|js|css|svg|ico|inc|xml|json|log)\b']
+    remediation: Set security.limit_extensions = .php
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php#security-limit-extensions]
+    tests:
+      pass: {files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = /run/php-fpm/www.sock\nsecurity.limit_extensions = .php\n"}}
+      fail:
+        - files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = /run/php-fpm/www.sock\nsecurity.limit_extensions = .php .html .jpg\n"}
+        - files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = /run/php-fpm/www.sock\nsecurity.limit_extensions =\n"}
+
+  - id: php-fpm:clear-env-off
+    title: PHP-FPM passes the master's environment to scripts (clear_env = no)
+    description: clear_env = no exposes every environment variable of the FPM master (often credentials from systemd or containers) to all PHP code.
+    severity: low
+    probe: {type: config, format: phpfpm, key: clear_env, default: "yes"}
+    expect: ["value not_in no,off,0,false"]
+    remediation: Remove clear_env = no and pass only needed variables with env[NAME] = value.
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php#clear-env]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = /run/php-fpm/www.sock\nclear_env = no\n"}}
+
+  - id: php-fpm:status-path
+    title: PHP-FPM status page enabled
+    description: pm.status_path exposes pool state and, with ?full, every client IP and request URI; if the web server routes it publicly it leaks tokens in URLs.
+    severity: low
+    level: strict
+    probe: {type: config, format: phpfpm, key: pm.status_path}
+    where: [set eq true]
+    expect_none: true
+    evidence: "{file}: pm.status_path = {value}"
+    remediation: Remove pm.status_path or make sure the web server only routes it from localhost/monitoring.
+    references: [https://www.php.net/manual/en/fpm.status.php]
+    tests:
+      pass: {}
+      fail: {files: {/etc/php-fpm.d/www.conf: "[www]\nuser = apache\nlisten = /run/php-fpm/www.sock\npm.status_path = /status\n"}}
+
+  - id: php-fpm:pool-web-server-user
+    title: PHP-FPM pool runs as the web server user
+    description: When PHP runs as nginx/apache/www-data it can read everything the web server can (other sites, TLS material readable by that user) and rewrite its own code; a dedicated user per site limits a compromise.
+    severity: low
+    level: strict
+    probe: {type: config, format: phpfpm, key: user, default: ""}
+    expect: ["value not_in nginx,apache,www-data,www,httpd,_www"]
+    remediation: Create a dedicated user per site and set user/group in its pool; give the web server access only via the socket group.
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php#user]
+    tests:
+      pass: {files: {/etc/php-fpm.d/www.conf: "[www]\nuser = site1\nlisten = /run/php-fpm/www.sock\n"}}
+      fail: {}
+
+  - id: php-fpm:conf-world-writable
+    title: PHP-FPM configuration writable by any user
+    description: The root-started FPM master reads these files; anyone who can edit them can start a pool as root.
+    severity: high
+    probe:
+      type: file
+      path: [/etc/php-fpm.conf, /etc/php-fpm.d/*.conf, /etc/php/*/fpm/php-fpm.conf, /etc/php/*/fpm/pool.d/*.conf, /etc/opt/remi/php*/php-fpm.conf, /etc/opt/remi/php*/php-fpm.d/*.conf, /etc/php*/php-fpm.conf, /etc/php*/php-fpm.d/*.conf]
+    expect: [mode bits_none 0002]
+    remediation: Remove world write permission.
+    fix: chmod o-w {path}
+    references: [https://www.php.net/manual/en/install.fpm.configuration.php]
+    tests:
+      pass: {meta: {/etc/php-fpm.d/www.conf: "0644 0 0"}}
+      fail: {meta: {/etc/php-fpm.d/www.conf: "0666 0 0"}}
