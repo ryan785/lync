@@ -504,7 +504,7 @@ else
 	fi
 fi
 if [ -n "$REPORT" ]; then
-	summary=$(tr ',' '\n' <"$REPORT" | awk -F: '/"(critical|high|medium|low|total)"/ {gsub(/[ "{}]/,""); printf "%s=%s ", $1, $2}' | head -c 200)
+	summary=$(tr ',' '\n' <"$REPORT" | awk -F: '/"(critical|high|medium|low|total)"/ {gsub(/[ "{}]/,""); if (!seen[$1]++) printf "%s=%s ", $1, $2}' | head -c 200)
 	log SUMMARY "$summary"
 	say "findings: $summary"
 fi
