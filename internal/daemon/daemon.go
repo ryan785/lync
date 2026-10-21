@@ -229,15 +229,20 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 			"packages_total", len(facts.Packages))
 	}
 
-	all, sources := d.gatherVulns(ctx, scoped)
+	distro := d.distroFacts(scoped) // NodeSource nodejs: matched upstream instead
+	all, sources := d.gatherVulns(ctx, distro)
 
-	findings := matcher.Match(scoped, all, d.log)
+	findings := matcher.Match(distro, all, d.log)
 	audit.Log("MATCH", "vulns=%d candidate_findings=%d", len(all), len(findings))
-	findings, applicStats := d.applicEngine.Filter(ctx, findings, scoped)
+	findings, applicStats := d.applicEngine.Filter(ctx, findings, distro)
 	audit.Log("APPLIC", "evaluated=%d suppressed=%d by_judge=%v", applicStats.Evaluated, applicStats.Suppressed, applicStats.SuppressedByJudge)
 	findings = matcher.EnrichSeverity(findings, all)
 	if d.cfg.Feed.LocalCheck && scope.IsAll() {
 		findings = d.localCrossCheck(ctx, scoped, findings, sources)
+	}
+	var up *upstreamPass
+	if scope.IsAll() {
+		up = d.upstreamPrepare(ctx, scoped) // before the rules: feeds runtime:eol-node
 	}
 	var coverage []finding.PackCoverage
 	if scope.IsAll() && d.rulesEngine != nil {
@@ -251,6 +256,9 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 		var invFindings []finding.Finding
 		inv, invFindings = d.runInventory(ctx, sources)
 		findings = append(findings, invFindings...)
+	}
+	if up != nil {
+		findings = append(findings, d.upstreamFindings(ctx, up, inv, all, sources)...)
 	}
 	if scope.IsAll() && d.mon != nil {
 		findings = append(findings, d.mon.Drain()...)

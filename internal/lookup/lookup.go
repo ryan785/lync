@@ -330,3 +330,14 @@ func (c *Client) CVE(ctx context.Context, facts *collector.Facts, id string) ([]
 	}
 	return vulns, src
 }
+
+// NVD looks CVE ids up on NVD by id, sharing this client's cache, rate
+// limiter and per-run cap. ok is false when the nvd source is off. Used
+// to score CVEs found outside the package lookup (upstream runtimes).
+func (c *Client) NVD(ctx context.Context, ids []string) ([]feed.Vulnerability, feed.SourceStat, bool) {
+	if !c.cfg.NVD {
+		return nil, feed.SourceStat{}, false
+	}
+	vs, st := c.nvd.Lookup(ctx, ids)
+	return vs, st, true
+}
