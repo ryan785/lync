@@ -148,8 +148,7 @@ They already cover OS packages plus language dependencies.
 | Item | State | Effort |
 |---|---|---|
 | Live config reload | SIGHUP now validates only, and no longer kills the daemon. Real reload means rebuilding sources/engines under a lock and resetting scheduler tickers. | 1 d |
-| Prebuilt release artifacts | `install.sh` installs Go + git on every target and builds there. For production servers, publish static binaries + nfpm RPM/DEB from CI (GitHub Actions release) and have install.sh download them. | 0.5-1 d |
-| OpenRC init script (Alpine) | Docs contain a template only. Ship `packaging/openrc/lync` and install it from install.sh on Alpine. | 1-2 h |
+| OpenRC init script (Alpine) | The `.apk` installs the binaries and config but no service: Alpine has no systemd, so the post-install script prints how to run `lyncd`. Ship `packaging/openrc/lync` in the `.apk` (nfpm `packager: apk` content entry) and start it from the post-install script. | 1-2 h |
 | SUSE | Judge is a stub, no feed. | 2 d |
 | EOL rule cache dir | Hardcoded `/var/lib/lync/feeds/eol`; should follow `feed.cache_dir` (matters for `-once -cache-dir`). | 0.5 h |
 | Per-scan UUID in logs, TRACE level | Described in the original design, not implemented (`trace` maps to debug). | 0.5 d |

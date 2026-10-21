@@ -260,7 +260,10 @@ internal/
 packaging/
   systemd/lync.service
   config/lync.yaml
-  scripts/postinstall.sh + preremove.sh
+  scripts/                 package scripts: postinstall (enable + start), preremove,
+                           postremove, postupgrade (apk)
+nfpm.yaml                  .deb / .rpm / .apk definition (built by `make release`)
+install.sh                 one-line installer: downloads + installs the package
 ```
 
 The `internal/` enforcement keeps the public API surface limited to

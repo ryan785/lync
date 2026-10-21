@@ -48,30 +48,56 @@ out-of-band changes, and produces a PDF + JSON report.
   reads back from JSON; `lync render <json>` regenerates a PDF from any
   past report.
 
-## Quick start: scan once, install nothing
+## Quick start: install as a service
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ryan785/lync/main/install.sh | sudo sh
+```
+
+That downloads the `.deb`, `.rpm` or `.apk` for your machine (amd64 or
+arm64) from the latest GitHub Release, verifies it against `SHA256SUMS`,
+installs it with `apt-get`, `dnf`/`yum`/`zypper` or `apk`, and the package
+starts the `lync` systemd service. Nothing is compiled and no build tools
+are installed. Pin a release with `... | sudo sh -s -- --version v0.2.0`.
+
+```sh
+systemctl status lync
+lync status
+lync scan        # first scan now; reports land in /var/lib/lync/reports/
+```
+
+Prefer to install the package yourself? Every release has
+`lync-linux-<arch>.{deb,rpm,apk}`:
+
+```sh
+sudo apt-get install ./lync-linux-amd64.deb                # Debian / Ubuntu
+sudo dnf install ./lync-linux-amd64.rpm                    # Rocky / RHEL / Alma / Fedora
+sudo apk add --allow-untrusted ./lync-linux-amd64.apk      # Alpine (no systemd: run lyncd yourself)
+```
+
+Upgrades restart the service and keep your `/etc/lync/lync.yaml`; removal
+stops and disables it. On hosts without systemd the package installs
+cleanly and tells you how to run `lyncd`. Details, uninstall and distro
+notes: [`docs/INSTALL.md`](docs/INSTALL.md).
+
+## Scan once, install nothing
 
 Run a full scan (all feeds, judges, every check, PDF) and leave **only a
 log file** behind. Details, cleanup guarantees and exit codes are in
 [`docs/RUNNER.md`](docs/RUNNER.md).
 
-From your workstation over SSH (works while the repo is private; Git Bash
-on Windows is fine):
+On the host itself:
 
 ```sh
-make release                         # builds dist/lyncd-linux-{amd64,arm64} + SHA256SUMS
-./lync-run root@host.example.com     # report lands in ./lync-results/<UTC>/<host>/
-./lync-run --cve CVE-2026-109618 -f hosts.txt --cache ~/.cache/lync-feeds
+curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh
 ```
 
-On the host itself (needs a published GitHub Release):
+From your workstation over SSH (Git Bash on Windows is fine):
 
 ```sh
-# public repo
-curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh
-# private repo: fine-grained token with Contents: read
-read -rs LYNC_GH_TOKEN; export LYNC_GH_TOKEN
-curl -fsSL -H "Authorization: Bearer $LYNC_GH_TOKEN" -H "Accept: application/vnd.github.raw" \
-  https://api.github.com/repos/ryan785/lync/contents/run.sh | sudo LYNC_GH_TOKEN="$LYNC_GH_TOKEN" sh
+make release                         # or download dist/ assets from a release
+./lync-run root@host.example.com     # report lands in ./lync-results/<UTC>/<host>/
+./lync-run --cve CVE-2026-109618 -f hosts.txt --cache ~/.cache/lync-feeds
 ```
 
 Either way: private temp dir (mode 700, noexec-aware, space-checked),
@@ -80,105 +106,15 @@ removes everything on exit, Ctrl-C or SSH hangup. The log at
 `/var/log/lync-run-<UTC>.log` records every command, download, file and
 check.
 
-## Quick install (as a service)
+## Build from source (developers)
 
-### One-liner (any supported distro)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/ryan785/lync/main/install.sh | sudo sh
-```
-
-The installer detects your distro (Debian, Ubuntu, Rocky, RHEL, AlmaLinux,
-CentOS, Fedora, Alpine, openSUSE, SLES), installs Go + git + make via the
-right package manager, clones this repo, builds, installs binaries +
-systemd unit, and starts the daemon. See [`install.sh`](install.sh) — it's
-a single POSIX-sh file you can read before piping to `sh`.
-
-Override behavior with environment variables:
+Needs Go 1.23+ (and `nfpm` for packages):
 
 ```sh
-# Install but don't start the service yet
-curl -fsSL https://raw.githubusercontent.com/ryan785/lync/main/install.sh | sudo LYNC_START=0 sh
-
-# Install a specific tag
-curl -fsSL https://raw.githubusercontent.com/ryan785/lync/main/install.sh | sudo LYNC_REF=v0.1.0 sh
-
-# Run from a local clone (script auto-detects this)
 git clone https://github.com/ryan785/lync.git && cd lync
-sudo ./install.sh
-```
-
-If you'd rather see the manual steps for each distro:
-
-### Debian / Ubuntu
-
-```sh
-# Build & install from source
-sudo apt-get update
-sudo apt-get install -y golang-go git make
-git clone https://github.com/ryan785/lync.git
-cd lync
-make build
-sudo make install
-sudo systemctl daemon-reload
-sudo systemctl enable --now lync
-lync status
-```
-
-Or, with a pre-built `.deb` (when releases are published):
-
-```sh
-sudo dpkg -i lync_0.1.0_amd64.deb
-sudo systemctl enable --now lync
-```
-
-### Rocky / RHEL / AlmaLinux / Fedora
-
-```sh
-# Build & install from source
-sudo dnf install -y golang git make
-git clone https://github.com/ryan785/lync.git
-cd lync
-make build
-sudo make install
-sudo systemctl daemon-reload
-sudo systemctl enable --now lync
-lync status
-```
-
-Or, with a pre-built `.rpm`:
-
-```sh
-sudo dnf install ./lync-0.1.0-1.x86_64.rpm
-sudo systemctl enable --now lync
-```
-
-### Alpine
-
-```sh
-# Build & install from source
-sudo apk add go git make
-git clone https://github.com/ryan785/lync.git
-cd lync
-make build
-sudo make install
-# Alpine uses OpenRC by default; the systemd unit won't apply without
-# systemd. Run the daemon directly or write an OpenRC init script.
-sudo /usr/sbin/lyncd &
-lync status
-```
-
-(Alpine support in the daemon is functional; the OpenRC service file is on
-the roadmap.)
-
-### Build a package locally
-
-`nfpm` is required (`go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest`):
-
-```sh
-make rpm    # → dist/lync-0.1.0-1.x86_64.rpm
-make deb    # → dist/lync_0.1.0_amd64.deb
-make package  # both
+make build && make test
+sudo make install && sudo systemctl daemon-reload && sudo systemctl enable --now lync
+make release     # dist/: static binaries, .deb/.rpm/.apk, tarballs, run.sh, SHA256SUMS
 ```
 
 ## First-run workflow
@@ -216,7 +152,7 @@ seconds — see [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#nvd-api-key).
 
 | Topic | File |
 |---|---|
-| Detailed installation per distro | [`docs/INSTALL.md`](docs/INSTALL.md) |
+| Installation, upgrade, uninstall | [`docs/INSTALL.md`](docs/INSTALL.md) |
 | Configuration reference (`lync.yaml`) | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) |
 | Every check, its ID and severity | [`docs/CHECKS.md`](docs/CHECKS.md) |
 | CLI reference | [`docs/CLI.md`](docs/CLI.md) |
