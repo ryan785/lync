@@ -614,7 +614,7 @@ func (n *Node) releaseFinding(env Env, in Install, v Version, target, latest nod
 		Package:     nodePackage(in),
 		Installed:   in.Version,
 		FixedIn:     target.Version.String(),
-		Source:      "nodejs.org",
+		Source:      "nodejs-release",
 		Check:       CheckNodeRelease,
 		Pack:        "runtimes",
 	}

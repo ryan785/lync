@@ -357,7 +357,7 @@ func TestNodeReleaseDayGap(t *testing.T) {
 	}
 	f := m[CheckNodeRelease+":/opt/a/bin/node"]
 	if f.Title != "Node 22.23.3 is behind security release 22.23.4 (2026-10-20)" || f.Severity != finding.SeverityHigh ||
-		f.FixedIn != "22.23.4" || f.Category != finding.CategoryCVE || f.CVE != "" {
+		f.FixedIn != "22.23.4" || f.Category != finding.CategoryCVE || f.CVE != "" || f.Source != "nodejs-release" || f.Package != "node" {
 		t.Errorf("release finding = %+v", f)
 	}
 	// 22.22.0: the July CVEs, plus the release finding for the release the
