@@ -14,7 +14,8 @@ import (
 	"github.com/ryan785/lync/internal/reporter"
 )
 
-const version = "0.1.0"
+// version is set at build time (-ldflags "-X main.version=...").
+var version = "0.1.0"
 
 const usage = `lync - Linux vulnerability scanner CLI
 
