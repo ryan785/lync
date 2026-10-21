@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,8 @@ type OSVLookup struct {
 	BaseURL     string
 	CacheFile   string        // JSON cache of converted advisories ("" = no cache)
 	Concurrency int           // parallel detail fetches (default 8)
+	BatchSize   int           // queries per querybatch request (default and API max 1000)
+	MaxPages    int           // next_page_token rounds per chunk (default 50)
 	MaxAge      time.Duration // refetch a cached advisory after this even if unmodified (default 7d)
 	Forget      time.Duration // drop cache entries not seen for this long (default 30d)
 
@@ -56,10 +59,26 @@ func NewOSVLookup(cacheFile string) *OSVLookup {
 	}
 }
 
+// SetHTTPClient replaces the HTTP client (timeouts, transport). Request
+// and byte counting is kept by wrapping its transport.
+func (o *OSVLookup) SetHTTPClient(c *http.Client) {
+	cp := *c
+	o.cnt.base = cp.Transport
+	cp.Transport = o.cnt
+	o.client = &cp
+}
+
 func (o *OSVLookup) defaults() {
 	if o.Concurrency <= 0 {
 		o.Concurrency = 8
 	}
+	if o.BatchSize <= 0 || o.BatchSize > osvBatchMax {
+		o.BatchSize = osvBatchMax
+	}
+	if o.MaxPages <= 0 {
+		o.MaxPages = 50
+	}
+	o.BaseURL = strings.TrimRight(o.BaseURL, "/")
 	if o.MaxAge <= 0 {
 		o.MaxAge = 7 * 24 * time.Hour
 	}
@@ -152,7 +171,7 @@ func (o *OSVLookup) Scan(ctx context.Context, eco HostEcosystem, pkgs []collecto
 
 	hits, err := o.QueryBatch(ctx, queries)
 	if err != nil {
-		res.Err = fmt.Errorf("osv querybatch: %w", err)
+		res.Err = err
 		res.Stat.Status = StatusFailed
 		res.Stat.Detail = res.Err.Error()
 		return res
@@ -192,54 +211,127 @@ func (o *OSVLookup) Scan(ctx context.Context, eco HostEcosystem, pkgs []collecto
 	return res
 }
 
-// QueryBatch runs every query against POST /v1/querybatch (chunked at
-// 1000, following next_page_token) and returns the advisory ids hit, each
-// with its "modified" stamp. Reusable by any caller that has its own
-// package list (language ecosystems, containers): build OSVQuery values
-// with the OSV ecosystem name ("npm", "PyPI", "Debian:12", ...).
-func (o *OSVLookup) QueryBatch(ctx context.Context, queries []OSVQuery) (map[string]string, error) {
-	hits := map[string]string{}
-	pending := queries
-	for round := 0; len(pending) > 0; round++ {
-		if round > 50 {
-			return hits, errors.New("too many result pages")
+// OSVHit is one advisory returned for one query.
+type OSVHit struct {
+	ID       string `json:"id"`
+	Modified string `json:"modified"`
+}
+
+// QueryBatchEach runs queries against POST /v1/querybatch in chunks of
+// BatchSize (API max 1000). Within each chunk, queries whose result
+// carried a next_page_token are re-sent with that token until no pages
+// remain (at most MaxPages rounds). The result has one slice of hits per
+// query, in query order. This is the single OSV querybatch
+// implementation; OS packages (lookup mode) and application components
+// (internal/inventory) both go through it.
+func (o *OSVLookup) QueryBatchEach(ctx context.Context, queries []OSVQuery) ([][]OSVHit, error) {
+	o.defaults()
+	out := make([][]OSVHit, len(queries))
+	for start := 0; start < len(queries); start += o.BatchSize {
+		end := start + o.BatchSize
+		if end > len(queries) {
+			end = len(queries)
 		}
-		var next []OSVQuery
-		for start := 0; start < len(pending); start += osvBatchMax {
-			end := start + osvBatchMax
-			if end > len(pending) {
-				end = len(pending)
+		idx := make([]int, 0, end-start)
+		for i := start; i < end; i++ {
+			idx = append(idx, i)
+		}
+		tokens := make([]string, len(idx))
+		for page := 0; len(idx) > 0; page++ {
+			if page >= o.MaxPages {
+				return out, fmt.Errorf("osv querybatch: more than %d pages of results", o.MaxPages)
 			}
-			chunk := pending[start:end]
-			body, err := json.Marshal(map[string]any{"queries": chunk})
+			batch := make([]OSVQuery, len(idx))
+			for j, i := range idx {
+				batch[j] = queries[i]
+				batch[j].PageToken = tokens[j]
+			}
+			body, err := json.Marshal(map[string]any{"queries": batch})
 			if err != nil {
-				return hits, err
+				return out, err
 			}
 			var r osvBatchResp
 			if err := o.postJSON(ctx, o.BaseURL+"/v1/querybatch", body, &r); err != nil {
-				return hits, err
+				return out, fmt.Errorf("osv querybatch: %w", err)
 			}
-			if len(r.Results) != len(chunk) {
-				return hits, fmt.Errorf("querybatch returned %d results for %d queries", len(r.Results), len(chunk))
+			if len(r.Results) != len(batch) {
+				return out, fmt.Errorf("osv querybatch: %d results for %d queries", len(r.Results), len(batch))
 			}
-			for i, qr := range r.Results {
+			var nextIdx []int
+			var nextTok []string
+			for j, qr := range r.Results {
 				for _, v := range qr.Vulns {
-					if v.Modified > hits[v.ID] {
-						hits[v.ID] = v.Modified
-					} else if _, ok := hits[v.ID]; !ok {
-						hits[v.ID] = v.Modified
-					}
+					out[idx[j]] = append(out[idx[j]], OSVHit{ID: v.ID, Modified: v.Modified})
 				}
 				if qr.NextPageToken != "" {
-					q := chunk[i]
-					q.PageToken = qr.NextPageToken
-					next = append(next, q)
+					nextIdx = append(nextIdx, idx[j])
+					nextTok = append(nextTok, qr.NextPageToken)
 				}
 			}
+			idx, tokens = nextIdx, nextTok
 		}
-		pending = next
+	}
+	return out, nil
+}
+
+// QueryBatch is QueryBatchEach flattened: every advisory id hit, with its
+// newest "modified" stamp.
+func (o *OSVLookup) QueryBatch(ctx context.Context, queries []OSVQuery) (map[string]string, error) {
+	per, err := o.QueryBatchEach(ctx, queries)
+	if err != nil {
+		return nil, err
+	}
+	hits := map[string]string{}
+	for _, l := range per {
+		for _, h := range l {
+			if cur, ok := hits[h.ID]; !ok || h.Modified > cur {
+				hits[h.ID] = h.Modified
+			}
+		}
 	}
 	return hits, nil
+}
+
+// FetchRecords fetches GET /v1/vulns/{id} for each id concurrently
+// (Concurrency workers) and returns the raw JSON per id. Ids that 404 are
+// absent from the map; ids that failed are listed in failed.
+func (o *OSVLookup) FetchRecords(ctx context.Context, ids []string) (records map[string]json.RawMessage, failed []string) {
+	o.defaults()
+	records = map[string]json.RawMessage{}
+	var mu sync.Mutex
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	for w := 0; w < o.Concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range jobs {
+				var raw json.RawMessage
+				found, err := o.getInto(ctx, id, &raw)
+				mu.Lock()
+				switch {
+				case err != nil:
+					failed = append(failed, id)
+				case found:
+					records[id] = raw
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			mu.Lock()
+			failed = append(failed, id)
+			mu.Unlock()
+			continue
+		}
+		jobs <- id
+	}
+	close(jobs)
+	wg.Wait()
+	sort.Strings(failed)
+	return records, failed
 }
 
 func (o *OSVLookup) postJSON(ctx context.Context, u string, body []byte, out any) error {
@@ -301,51 +393,30 @@ func (o *OSVLookup) getInto(ctx context.Context, id string, out any) (found bool
 	return true, json.NewDecoder(resp.Body).Decode(out)
 }
 
-// fetchDetails fetches advisories concurrently and converts them for the
-// host. Returns converted vulns per id and the ids that failed.
+// fetchDetails fetches advisories and converts them for the host.
+// Returns converted vulns per id (nil for 404s) and the ids that failed.
 func (o *OSVLookup) fetchDetails(ctx context.Context, ids []string, eco HostEcosystem) (map[string][]Vulnerability, []string) {
+	raw, failed := o.FetchRecords(ctx, ids)
 	out := map[string][]Vulnerability{}
-	var failed []string
-	var mu sync.Mutex
-	jobs := make(chan string)
-	var wg sync.WaitGroup
-	for w := 0; w < o.Concurrency; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for id := range jobs {
-				rec, found, err := o.getRecord(ctx, id)
-				mu.Lock()
-				switch {
-				case err != nil:
-					failed = append(failed, id)
-				case !found:
-					out[id] = nil
-				default:
-					var vs []Vulnerability
-					for _, v := range osvToVulns(rec, eco.Accept, eco.Distro, true) {
-						vs = append(vs, trimVuln(v))
-					}
-					out[id] = vs
-				}
-				mu.Unlock()
-			}
-		}()
-	}
 	for _, id := range ids {
-		if ctx.Err() != nil {
-			break
+		if contains(failed, id) {
+			continue
 		}
-		jobs <- id
-	}
-	close(jobs)
-	wg.Wait()
-	if ctx.Err() != nil {
-		for _, id := range ids {
-			if _, ok := out[id]; !ok && !contains(failed, id) {
-				failed = append(failed, id)
-			}
+		data, ok := raw[id]
+		if !ok {
+			out[id] = nil
+			continue
 		}
+		var rec osvRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			failed = append(failed, id)
+			continue
+		}
+		var vs []Vulnerability
+		for _, v := range osvToVulns(&rec, eco.Accept, eco.Distro, true) {
+			vs = append(vs, trimVuln(v))
+		}
+		out[id] = vs
 	}
 	return out, failed
 }
