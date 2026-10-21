@@ -1,0 +1,121 @@
+pack: bruteforce
+title: Brute-force protection (fail2ban, sshguard, CrowdSec)
+description: Brute-force protectors that are installed but not running, jails that don't cover SSH, whitelists that cover the whole internet, and CrowdSec without a bouncer.
+category: config
+references:
+  - https://github.com/fail2ban/fail2ban/wiki
+  - https://docs.crowdsec.net/
+checks:
+  - id: fail2ban:not-running
+    title: fail2ban is installed but not running
+    description: The package is installed, so the host is assumed to be protected against password guessing, but the service is not active.
+    severity: medium
+    applies_if: {package: [fail2ban, fail2ban-server]}
+    probe: {type: systemd, name: fail2ban.service}
+    expect: [ActiveState eq active]
+    remediation: Fix the configuration error (fail2ban-client -t) and start the service.
+    fix: fail2ban-client -t && systemctl enable --now fail2ban
+    tests:
+      pass: {packages: {fail2ban: 1.0.2-3}, cmds: {"systemctl show fail2ban.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"}}
+      fail: {packages: {fail2ban: 1.0.2-3}, cmds: {"systemctl show fail2ban.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=failed\nUnitFileState=enabled\n"}}
+      na: {packages: {bash: 5.1-1}}
+
+  - id: fail2ban:no-sshd-jail
+    title: fail2ban runs without an SSH jail
+    description: sshd is running but fail2ban has no active sshd jail, so SSH password guessing is not throttled.
+    severity: medium
+    applies_if: {unit_active: fail2ban, process: sshd}
+    probe: {type: command, cmd: [fail2ban-client, status]}
+    expect: ['output regex Jail list:.*\bssh[\w-]*']
+    remediation: Enable the sshd jail in /etc/fail2ban/jail.local (or jail.d/sshd.local).
+    fix: "printf '[sshd]\\nenabled = true\\n' > /etc/fail2ban/jail.d/sshd.local && fail2ban-client reload"
+    references: [https://github.com/fail2ban/fail2ban/blob/master/config/jail.conf]
+    tests:
+      pass: {files: {/proc/80/comm: "sshd\n"}, cmds: {"systemctl is-active fail2ban.service": active, "fail2ban-client status": "Status\n|- Number of jail:\t2\n`- Jail list:\tnginx-botsearch, sshd\n"}}
+      fail: {files: {/proc/80/comm: "sshd\n"}, cmds: {"systemctl is-active fail2ban.service": active, "fail2ban-client status": "Status\n|- Number of jail:\t1\n`- Jail list:\tnginx-botsearch\n"}}
+      na: {cmds: {"systemctl is-active fail2ban.service": active, "fail2ban-client status": "Status\n`- Jail list:\t\n"}}
+
+  - id: fail2ban:ignoreip-any
+    title: fail2ban ignores every address
+    description: ignoreip in [DEFAULT] contains 0.0.0.0/0 or ::/0, so no client is ever banned.
+    severity: high
+    applies_if: {package: [fail2ban, fail2ban-server]}
+    probe: {type: config, format: ini, path: [/etc/fail2ban/jail.conf, /etc/fail2ban/jail.d/*.conf, /etc/fail2ban/jail.local, /etc/fail2ban/jail.d/*.local], section: DEFAULT, key: ignoreip, default: ""}
+    expect: ['value not_regex (^|[\s,])(0\.0\.0\.0/0|::/0|0\.0\.0\.0/1)($|[\s,])']
+    remediation: Whitelist only your own management addresses.
+    fix: "set 'ignoreip = 127.0.0.1/8 ::1 <your-admin-ip>' under [DEFAULT] in /etc/fail2ban/jail.local, then fail2ban-client reload"
+    references: [https://github.com/fail2ban/fail2ban/blob/master/config/jail.conf]
+    tests:
+      pass: {packages: {fail2ban: 1.0.2-3}, files: {/etc/fail2ban/jail.local: "[DEFAULT]\nignoreip = 127.0.0.1/8 ::1 10.0.0.5\n"}}
+      fail: {packages: {fail2ban: 1.0.2-3}, files: {/etc/fail2ban/jail.conf: "[DEFAULT]\nignoreip = 127.0.0.1/8\n", /etc/fail2ban/jail.local: "[DEFAULT]\nignoreip = 127.0.0.1/8 0.0.0.0/0\n"}}
+
+  - id: fail2ban:maxretry-high
+    title: fail2ban allows many attempts before banning
+    description: maxretry in [DEFAULT] above 10 lets attackers try many passwords per findtime window before a ban (default 5).
+    severity: low
+    applies_if: {package: [fail2ban, fail2ban-server]}
+    probe: {type: config, format: ini, path: [/etc/fail2ban/jail.conf, /etc/fail2ban/jail.d/*.conf, /etc/fail2ban/jail.local, /etc/fail2ban/jail.d/*.local], section: DEFAULT, key: maxretry, default: "5"}
+    expect: [value le 10]
+    remediation: Lower maxretry (5 is the upstream default).
+    fix: "set 'maxretry = 5' under [DEFAULT] in /etc/fail2ban/jail.local, then fail2ban-client reload"
+    references: [https://github.com/fail2ban/fail2ban/blob/master/config/jail.conf]
+    tests:
+      pass: {packages: {fail2ban: 1.0.2-3}, files: {/etc/fail2ban/jail.conf: "[DEFAULT]\nmaxretry = 5\n"}}
+      fail: {packages: {fail2ban: 1.0.2-3}, files: {/etc/fail2ban/jail.local: "[DEFAULT]\nmaxretry = 50\n"}}
+
+  - id: sshguard:not-running
+    title: sshguard is installed but not running
+    description: The package suggests SSH brute-force protection, but the service is not active.
+    severity: medium
+    applies_if: {package: sshguard}
+    probe: {type: systemd, name: sshguard.service}
+    expect: [ActiveState eq active]
+    remediation: Start and enable sshguard (check its backend configuration first).
+    fix: systemctl enable --now sshguard
+    references: [https://www.sshguard.net/docs/]
+    tests:
+      pass: {packages: {sshguard: 2.4.2-1}, cmds: {"systemctl show sshguard.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\n"}}
+      fail: {packages: {sshguard: 2.4.2-1}, cmds: {"systemctl show sshguard.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\n"}}
+
+  - id: crowdsec:not-running
+    title: CrowdSec is installed but not running
+    description: The CrowdSec engine is installed but its service is not active, so no attacks are detected.
+    severity: medium
+    applies_if: {package: crowdsec}
+    probe: {type: systemd, name: crowdsec.service}
+    expect: [ActiveState eq active]
+    remediation: Check the configuration (crowdsec -t) and start the service.
+    fix: systemctl enable --now crowdsec
+    tests:
+      pass: {packages: {crowdsec: 1.6.2}, cmds: {"systemctl show crowdsec.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\n"}}
+      fail: {packages: {crowdsec: 1.6.2}, cmds: {"systemctl show crowdsec.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=failed\n"}}
+
+  - id: crowdsec:no-bouncer
+    title: CrowdSec has no bouncer package installed
+    description: CrowdSec only detects; a bouncer (e.g. crowdsec-firewall-bouncer) is what actually blocks attackers. Without one, decisions are never enforced on this host.
+    severity: low
+    applies_if: {package: crowdsec}
+    probe: {type: package, name: ['crowdsec-*bouncer*']}
+    expect: [name not_empty]
+    missing: fail
+    missing_evidence: crowdsec is installed but no crowdsec-*-bouncer package is
+    remediation: Install a bouncer for this host (or confirm decisions are enforced elsewhere, e.g. on an upstream firewall).
+    fix: apt install crowdsec-firewall-bouncer-nftables  (or dnf install crowdsec-firewall-bouncer-nftables)
+    references: [https://docs.crowdsec.net/u/bouncers/intro]
+    tests:
+      pass: {packages: {crowdsec: 1.6.2, crowdsec-firewall-bouncer-nftables: 0.0.28}}
+      fail: {packages: {crowdsec: 1.6.2}}
+
+  - id: crowdsec:lapi-public
+    title: CrowdSec local API listens beyond localhost
+    description: The LAPI holds machine and bouncer credentials and accepts decisions; exposing it on all interfaces (without TLS) invites credential theft and decision tampering.
+    severity: medium
+    applies_if: {package: crowdsec}
+    probe: {type: config, format: yaml, path: [/etc/crowdsec/config.yaml, /etc/crowdsec/config.yaml.local], key: api.server.listen_uri, default: "127.0.0.1:8080"}
+    expect: ['value regex ^(127\.|localhost|\[::1\]|::1)']
+    remediation: Bind the LAPI to localhost, or to a private address with TLS when remote agents need it.
+    fix: "set api.server.listen_uri: 127.0.0.1:8080 in /etc/crowdsec/config.yaml and restart crowdsec"
+    references: [https://docs.crowdsec.net/docs/configuration/crowdsec_configuration/]
+    tests:
+      pass: {packages: {crowdsec: 1.6.2}, files: {/etc/crowdsec/config.yaml: "api:\n  server:\n    listen_uri: 127.0.0.1:8080\n"}}
+      fail: {packages: {crowdsec: 1.6.2}, files: {/etc/crowdsec/config.yaml: "api:\n  server:\n    listen_uri: 0.0.0.0:8080\n"}}

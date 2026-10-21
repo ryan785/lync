@@ -1,0 +1,250 @@
+pack: mail
+title: Mail servers (Postfix, Exim, Dovecot)
+description: Open-relay indicators, TLS for SMTP/IMAP/POP3, plaintext authentication, user enumeration, version disclosure and relay credential files. Postfix and Dovecot are read through their own configuration dumpers (postconf -n, doveconf -n), so includes and continuation lines are resolved.
+category: network
+references:
+  - https://www.postfix.org/postconf.5.html
+  - https://doc.dovecot.org/
+checks:
+  # ---- Postfix ------------------------------------------------------------------
+  - id: postfix:mynetworks-open
+    title: Postfix mynetworks trusts the whole internet (open relay)
+    description: Clients in mynetworks may relay mail to any destination; 0.0.0.0/0 or ::/0 there turns the server into an open relay that will be abused for spam within hours.
+    severity: critical
+    level: basic
+    applies_if: {package: postfix}
+    probe: {type: command, cmd: [postconf, -n]}
+    expect: ['output not_regex (?m)^mynetworks = .*(0\.0\.0\.0/0|::/0|\[::\]/0)']
+    remediation: Limit mynetworks to localhost and the hosts that really need to relay; use SASL authentication for roaming users.
+    fix: postconf -e 'mynetworks = 127.0.0.0/8 [::1]/128' && postfix reload
+    references: [https://www.postfix.org/postconf.5.html#mynetworks, https://www.postfix.org/SMTPD_ACCESS_README.html]
+    tests:
+      pass: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128\n"}}
+      fail: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "mynetworks = 127.0.0.0/8 0.0.0.0/0\n"}}
+      na: {cmds: {"postconf -n": "mynetworks = 0.0.0.0/0\n"}}
+      skip: {packages: {postfix: 3.7.11-0}}
+
+  - id: postfix:relay-unrestricted
+    title: Postfix relay restrictions lack reject_unauth_destination
+    description: smtpd_relay_restrictions is set without reject_unauth_destination / defer_unauth_destination and smtpd_recipient_restrictions does not add it either, so unauthenticated clients can relay mail to any domain.
+    severity: critical
+    level: basic
+    applies_if: {package: postfix}
+    probe: {type: command, cmd: [postconf, -n]}
+    expect: ['output not_regex (?m)^smtpd_relay_restrictions = || output regex (?m)^smtpd_relay_restrictions = .*\b(reject|defer)_unauth_destination || output regex (?m)^smtpd_recipient_restrictions = .*\b(reject|defer)_unauth_destination']
+    remediation: End smtpd_relay_restrictions with reject_unauth_destination (the Postfix default is permit_mynetworks, permit_sasl_authenticated, defer_unauth_destination).
+    fix: postconf -e 'smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination' && postfix reload
+    references: [https://www.postfix.org/postconf.5.html#smtpd_relay_restrictions]
+    tests:
+      pass:
+        - {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "myhostname = mx.example.org\n"}}
+        - {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination\n"}}
+        - {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_relay_restrictions = permit_mynetworks\nsmtpd_recipient_restrictions = permit_sasl_authenticated, reject_unauth_destination\n"}}
+      fail: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_relay_restrictions = permit_mynetworks, permit\n"}}
+
+  - id: postfix:no-tls
+    title: Postfix accepts SMTP without offering TLS
+    description: Postfix listens beyond localhost but smtpd_tls_security_level is unset/none, so mail and any SMTP AUTH passwords cross the network in clear text.
+    severity: medium
+    applies_if: {package: postfix, listening: 25}
+    probe: {type: command, cmd: [postconf, -n]}
+    where: ['output not_regex (?m)^inet_interfaces = (loopback-only|localhost|127\.0\.0\.1)\s*$']
+    expect: ['output regex (?m)^smtpd_tls_security_level = (may|encrypt|dane|dane-only|fingerprint|verify|secure) || output regex (?m)^smtpd_use_tls = yes']
+    remediation: Install a certificate and offer STARTTLS on port 25 (opportunistic TLS).
+    fix: postconf -e 'smtpd_tls_security_level = may' 'smtpd_tls_cert_file = /etc/pki/tls/certs/mail.pem' 'smtpd_tls_key_file = /etc/pki/tls/private/mail.key' && postfix reload
+    references: [https://www.postfix.org/TLS_README.html]
+    tests:
+      pass: {packages: {postfix: 3.7.11-0}, cmds: {"ss -H -tulnp": "tcp LISTEN 0 100 0.0.0.0:25 0.0.0.0:* users:((\"master\",pid=9,fd=13))", "postconf -n": "inet_interfaces = all\nsmtpd_tls_security_level = may\n"}}
+      fail: {packages: {postfix: 3.7.11-0}, cmds: {"ss -H -tulnp": "tcp LISTEN 0 100 0.0.0.0:25 0.0.0.0:* users:((\"master\",pid=9,fd=13))", "postconf -n": "inet_interfaces = all\n"}}
+      na: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "inet_interfaces = all\n"}}
+
+  - id: postfix:weak-tls-protocols
+    title: Postfix explicitly enables SSLv2/SSLv3
+    description: smtpd_tls_protocols or smtpd_tls_mandatory_protocols lists SSLv2 or SSLv3 without "!", re-enabling protocols broken by POODLE and DROWN.
+    severity: medium
+    applies_if: {package: postfix}
+    probe: {type: command, cmd: [postconf, -n]}
+    expect: ['output not_regex (?m)^smtpd_tls_(mandatory_)?protocols = (.*[\s,:])?SSLv[23]\b']
+    remediation: Exclude SSL protocols (Postfix 3.6+ syntax shown).
+    fix: postconf -e 'smtpd_tls_protocols = >=TLSv1.2' 'smtpd_tls_mandatory_protocols = >=TLSv1.2' && postfix reload
+    references: [https://www.postfix.org/postconf.5.html#smtpd_tls_protocols]
+    tests:
+      pass: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1\n"}}
+      fail: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_tls_protocols = SSLv3, TLSv1, TLSv1.2\n"}}
+
+  - id: postfix:vrfy-enabled
+    title: Postfix answers VRFY (user enumeration)
+    description: disable_vrfy_command defaults to no, letting anyone test which local addresses exist.
+    severity: low
+    applies_if: {package: postfix}
+    probe: {type: command, cmd: [postconf, -n]}
+    expect: ['output regex (?m)^disable_vrfy_command = yes']
+    remediation: Disable the VRFY command.
+    fix: postconf -e 'disable_vrfy_command = yes' && postfix reload
+    references: [https://www.postfix.org/postconf.5.html#disable_vrfy_command]
+    tests:
+      pass: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "disable_vrfy_command = yes\n"}}
+      fail: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "myhostname = mx.example.org\n"}}
+
+  - id: postfix:banner-version
+    title: Postfix SMTP banner discloses the version
+    description: smtpd_banner includes $mail_version, advertising the exact Postfix release to every client.
+    severity: low
+    applies_if: {package: postfix}
+    probe: {type: command, cmd: [postconf, -n]}
+    expect: ['output not_regex (?m)^smtpd_banner = .*\$\{?mail_version']
+    remediation: Use a banner without the version.
+    fix: postconf -e 'smtpd_banner = $myhostname ESMTP' && postfix reload
+    references: [https://www.postfix.org/postconf.5.html#smtpd_banner]
+    tests:
+      pass: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_banner = $myhostname ESMTP $mail_name\n"}}
+      fail: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_banner = $myhostname ESMTP $mail_name ($mail_version)\n"}}
+
+  - id: postfix:auth-without-tls
+    title: Postfix allows SMTP AUTH over unencrypted connections
+    description: SASL authentication is enabled in main.cf but smtpd_tls_auth_only is not yes, so clients may send passwords before STARTTLS.
+    severity: medium
+    applies_if: {package: postfix}
+    probe: {type: command, cmd: [postconf, -n]}
+    where: ['output regex (?m)^smtpd_sasl_auth_enable = yes']
+    expect: ['output regex (?m)^smtpd_tls_auth_only = yes']
+    remediation: Offer AUTH only after STARTTLS.
+    fix: postconf -e 'smtpd_tls_auth_only = yes' && postfix reload
+    references: [https://www.postfix.org/postconf.5.html#smtpd_tls_auth_only]
+    tests:
+      pass: [{packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_sasl_auth_enable = yes\nsmtpd_tls_auth_only = yes\n"}}, {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "myhostname = x\n"}}]
+      fail: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "smtpd_sasl_auth_enable = yes\n"}}
+
+  - id: postfix:sasl-passwd-perms
+    title: Postfix relay credentials are readable by other users
+    description: sasl_passwd holds the user name and password Postfix uses to log in to a relay host; if other users can read it they can send mail as you through that provider.
+    severity: high
+    applies_if: {package: postfix}
+    probe: {type: file, path: [/etc/postfix/sasl_passwd, /etc/postfix/sasl_passwd.db, /etc/postfix/sasl_passwd.lmdb, /etc/postfix/sasl/sasl_passwd, /etc/postfix/sasl/sasl_passwd.db]}
+    expect: [mode perm_max 0640]
+    remediation: Make the credential map root-only and rotate the password if others could read it.
+    fix: chown root:root {path} && chmod 0600 {path}
+    references: [https://www.postfix.org/SASL_README.html#client_sasl_enable]
+    tests:
+      pass: {packages: {postfix: 3.7.11-0}, files: {/etc/postfix/sasl_passwd: "[smtp.example.org]:587 user:lync-test-secret\n"}, meta: {/etc/postfix/sasl_passwd: "0600 0 0"}}
+      fail: {packages: {postfix: 3.7.11-0}, files: {/etc/postfix/sasl_passwd: "[smtp.example.org]:587 user:lync-test-secret\n", /etc/postfix/sasl_passwd.db: ""}, meta: {/etc/postfix/sasl_passwd: "0644 0 0", /etc/postfix/sasl_passwd.db: "0644 0 0"}, findings: 2}
+
+  - id: postfix:not-local-only
+    title: Postfix listens on all interfaces
+    description: CIS recommends inet_interfaces = loopback-only on hosts that only send their own mail. Ignore on real mail servers (disable this check there).
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {package: postfix}
+    probe: {type: command, cmd: [postconf, -n]}
+    expect: ['output regex (?m)^inet_interfaces = (loopback-only|localhost|127\.0\.0\.1)\s*$']
+    remediation: On hosts that don't receive mail, listen only on loopback.
+    fix: postconf -e 'inet_interfaces = loopback-only' && systemctl restart postfix
+    references: [https://www.postfix.org/postconf.5.html#inet_interfaces]
+    tests:
+      pass: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "inet_interfaces = loopback-only\n"}}
+      fail: {packages: {postfix: 3.7.11-0}, cmds: {"postconf -n": "inet_interfaces = all\n"}}
+
+  # ---- Exim -----------------------------------------------------------------------
+  - id: exim:dc-relay-nets-open
+    title: Exim (Debian) relays for any network
+    description: dc_relay_nets in update-exim4.conf.conf contains 0.0.0.0/0, ::/0 or *, so Exim relays mail for anyone (open relay).
+    severity: critical
+    level: basic
+    applies_if: {package: [exim4, exim4-daemon-light, exim4-daemon-heavy]}
+    probe: {type: config, format: env, path: /etc/exim4/update-exim4.conf.conf, key: dc_relay_nets}
+    expect: ['value not_regex (^|[;:\s])(0\.0\.0\.0/0|::0?/0|\*)($|[;:\s])']
+    remediation: List only trusted networks in dc_relay_nets and regenerate the configuration.
+    fix: sed -i "s|^dc_relay_nets=.*|dc_relay_nets=''|" /etc/exim4/update-exim4.conf.conf && update-exim4.conf && systemctl restart exim4
+    references: [https://manpages.debian.org/bookworm/exim4-config/update-exim4.conf.8.en.html]
+    tests:
+      pass: {packages: {exim4: 4.96-15}, files: {/etc/exim4/update-exim4.conf.conf: "dc_eximconfig_configtype='internet'\ndc_relay_nets='192.168.10.0/24'\n"}}
+      fail: {packages: {exim4: 4.96-15}, files: {/etc/exim4/update-exim4.conf.conf: "dc_relay_nets='0.0.0.0/0'\n"}}
+
+  - id: exim:relay-from-hosts-open
+    title: Exim relay_from_hosts allows any host
+    description: hostlist relay_from_hosts includes * or 0.0.0.0/0 in exim.conf, which makes Exim an open relay.
+    severity: critical
+    level: basic
+    applies_if: {package: [exim, exim4, exim4-daemon-light, exim4-daemon-heavy]}
+    probe: {type: content, combine: true, path: [/etc/exim/exim.conf, /etc/exim4/exim4.conf.template, /etc/exim4/exim4.conf, /etc/exim4/conf.d/main/*], regex: '^\s*hostlist\s+relay_from_hosts\s*=.*(\*|0\.0\.0\.0/0|::0?/0)'}
+    expect: [match eq false]
+    remediation: Limit relay_from_hosts to localhost and trusted networks.
+    fix: "set 'hostlist relay_from_hosts = <; 127.0.0.1 ; ::1' and restart exim"
+    references: [https://www.exim.org/exim-html-current/doc/html/spec_html/ch-the_default_configuration_file.html]
+    tests:
+      pass: {packages: {exim: 4.97-1.el9}, files: {/etc/exim/exim.conf: "hostlist relay_from_hosts = <; 127.0.0.1 ; ::1\n"}}
+      fail: {packages: {exim: 4.97-1.el9}, files: {/etc/exim/exim.conf: "hostlist relay_from_hosts = *\n"}}
+
+  # ---- Dovecot ----------------------------------------------------------------------
+  - id: dovecot:plaintext-auth
+    title: Dovecot allows plaintext authentication without TLS
+    description: disable_plaintext_auth = no (2.3) or auth_allow_cleartext = yes (2.4) lets IMAP/POP3 clients send passwords over unencrypted connections.
+    severity: high
+    applies_if: {package: [dovecot, dovecot-core]}
+    probe: {type: command, cmd: [doveconf, -n]}
+    expect: ['output not_regex (?m)^(disable_plaintext_auth = no|auth_allow_cleartext = yes)\s*$']
+    remediation: Require TLS before authentication.
+    fix: "echo 'disable_plaintext_auth = yes' > /etc/dovecot/conf.d/99-lync.conf && systemctl reload dovecot"
+    references: [https://doc.dovecot.org/2.3/settings/core/#core_setting-disable_plaintext_auth]
+    tests:
+      pass: {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "ssl = required\nprotocols = imap\n"}}
+      fail: {packages: {dovecot-core: 1:2.3.19.1}, cmds: {"doveconf -n": "disable_plaintext_auth = no\nssl = yes\n"}}
+      na: {cmds: {"doveconf -n": "disable_plaintext_auth = no\n"}}
+
+  - id: dovecot:ssl-disabled
+    title: Dovecot TLS is disabled
+    description: ssl = no means IMAP/POP3 sessions, including passwords and mail, are never encrypted.
+    severity: high
+    applies_if: {package: [dovecot, dovecot-core]}
+    probe: {type: command, cmd: [doveconf, -n]}
+    expect: ['output not_regex (?m)^ssl = no\s*$']
+    remediation: Configure a certificate and set ssl = required (or yes).
+    fix: "printf 'ssl = required\\nssl_cert = </etc/pki/dovecot/certs/dovecot.pem\\nssl_key = </etc/pki/dovecot/private/dovecot.pem\\n' > /etc/dovecot/conf.d/99-lync-ssl.conf && systemctl reload dovecot"
+    references: [https://doc.dovecot.org/2.3/configuration_manual/dovecot_ssl_configuration/]
+    tests:
+      pass: {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "ssl = required\n"}}
+      fail: {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "ssl = no\n"}}
+
+  - id: dovecot:weak-ssl-protocol
+    title: Dovecot accepts SSLv3/TLS 1.0/TLS 1.1
+    description: ssl_min_protocol is set to a deprecated protocol version.
+    severity: medium
+    applies_if: {package: [dovecot, dovecot-core]}
+    probe: {type: command, cmd: [doveconf, -n]}
+    expect: ['output not_regex (?m)^ssl_min_protocol = (SSLv3|TLSv1|TLSv1\.1)\s*$']
+    remediation: Require TLS 1.2 or newer.
+    fix: "echo 'ssl_min_protocol = TLSv1.2' > /etc/dovecot/conf.d/99-lync-tls.conf && systemctl reload dovecot"
+    references: [https://doc.dovecot.org/2.3/settings/core/#core_setting-ssl_min_protocol]
+    tests:
+      pass: {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "ssl_min_protocol = TLSv1.2\n"}}
+      fail: {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "ssl_min_protocol = TLSv1\n"}}
+
+  - id: dovecot:passwords-logged
+    title: Dovecot logs passwords
+    description: auth_verbose_passwords other than no, or auth_debug_passwords = yes, writes user passwords (or their hashes) to the mail log.
+    severity: medium
+    applies_if: {package: [dovecot, dovecot-core]}
+    probe: {type: command, cmd: [doveconf, -n]}
+    expect: ['output not_regex (?m)^(auth_verbose_passwords = (plain|yes|sha1|[a-z0-9]+:\d+)|auth_debug_passwords = yes)\s*$']
+    remediation: Turn password logging off and purge logs that contain passwords.
+    fix: "printf 'auth_verbose_passwords = no\\nauth_debug_passwords = no\\n' > /etc/dovecot/conf.d/99-lync-auth.conf && systemctl reload dovecot"
+    references: [https://doc.dovecot.org/2.3/settings/core/#core_setting-auth_verbose_passwords]
+    tests:
+      pass: {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "auth_verbose = yes\n"}}
+      fail: [{packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "auth_verbose_passwords = plain\n"}}, {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "auth_debug_passwords = yes\n"}}]
+
+  - id: dovecot:auth-mechanisms-cram
+    title: Dovecot offers legacy challenge-response mechanisms
+    description: CRAM-MD5/DIGEST-MD5 require the server to store plaintext-equivalent passwords and are deprecated; use PLAIN/LOGIN over TLS instead.
+    severity: low
+    level: strict
+    applies_if: {package: [dovecot, dovecot-core]}
+    probe: {type: command, cmd: [doveconf, -n]}
+    expect: ['output not_regex (?mi)^auth_mechanisms = .*\b(cram-md5|digest-md5|ntlm|rpa)\b']
+    remediation: Limit auth_mechanisms to plain login (with TLS required) or SCRAM.
+    fix: "echo 'auth_mechanisms = plain login' > /etc/dovecot/conf.d/99-lync-mech.conf && systemctl reload dovecot"
+    references: [https://doc.dovecot.org/2.3/configuration_manual/authentication/authentication_mechanisms/]
+    tests:
+      pass: {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "auth_mechanisms = plain login\n"}}
+      fail: {packages: {dovecot: 2.3.16-11.el9}, cmds: {"doveconf -n": "auth_mechanisms = plain cram-md5\n"}}

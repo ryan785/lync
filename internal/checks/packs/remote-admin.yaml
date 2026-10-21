@@ -1,0 +1,201 @@
+pack: remote-admin
+title: Remote administration (Webmin, Cockpit, VNC, xrdp, X11)
+description: Web admin panels and remote desktops exposed to the network, without TLS or authentication, or allowing root logins.
+category: network
+references:
+  - https://doxfer.webmin.com/Webmin/Main_Page
+  - https://cockpit-project.org/guide/latest/
+checks:
+  # ---- Webmin -------------------------------------------------------------------
+  - id: webmin:public-listener
+    title: Webmin is reachable on a public interface
+    description: Webmin runs as root and has a long history of remote code execution bugs (e.g. CVE-2019-15107); it should only be reachable from a VPN or admin network.
+    severity: high
+    applies_if: {any: [{package: webmin}, {file: /etc/webmin/miniserv.conf}]}
+    probe: {type: listener, ports: [10000]}
+    expect: [loopback eq true]
+    remediation: Bind Webmin to localhost (and tunnel over SSH) or firewall port 10000 to admin addresses; keep Webmin updated.
+    fix: "set bind=127.0.0.1 in /etc/webmin/miniserv.conf and systemctl restart webmin"
+    references: ['https://www.cve.org/CVERecord?id=CVE-2019-15107']
+    tests:
+      pass: {packages: {webmin: 2.105}, cmds: {"ss -H -tulnp": "tcp LISTEN 0 128 127.0.0.1:10000 0.0.0.0:* users:((\"miniserv.pl\",pid=4,fd=5))"}}
+      fail: {packages: {webmin: 2.105}, cmds: {"ss -H -tulnp": "tcp LISTEN 0 128 0.0.0.0:10000 0.0.0.0:* users:((\"miniserv.pl\",pid=4,fd=5))"}}
+      na: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 128 0.0.0.0:10000 0.0.0.0:*"}}
+
+  - id: webmin:ssl-off
+    title: Webmin serves logins over plain HTTP
+    description: ssl=0 in miniserv.conf sends root-equivalent Webmin credentials and sessions unencrypted.
+    severity: high
+    applies_if: {any: [{package: webmin}, {file: /etc/webmin/miniserv.conf}]}
+    probe: {type: config, format: kv, path: /etc/webmin/miniserv.conf, key: ssl, default: "0"}
+    expect: [value eq 1]
+    remediation: Enable SSL in Webmin (Webmin Configuration > SSL Encryption) with a valid certificate.
+    fix: sed -i 's/^ssl=.*/ssl=1/' /etc/webmin/miniserv.conf && systemctl restart webmin
+    references: [https://doxfer.webmin.com/Webmin/Webmin_Configuration]
+    tests:
+      pass: {packages: {webmin: 2.105}, files: {/etc/webmin/miniserv.conf: "port=10000\nssl=1\n"}}
+      fail: {packages: {webmin: 2.105}, files: {/etc/webmin/miniserv.conf: "port=10000\nssl=0\n"}}
+
+  - id: webmin:no-ip-allowlist
+    title: Webmin accepts connections from any address
+    description: miniserv.conf has no allow= list, so every address that reaches the port can try to log in.
+    severity: low
+    applies_if: {any: [{package: webmin}, {file: /etc/webmin/miniserv.conf}]}
+    probe: {type: config, format: kv, path: /etc/webmin/miniserv.conf, key: allow, default: ""}
+    expect: [value not_empty]
+    remediation: Restrict Webmin to admin addresses (Webmin Configuration > IP Access Control).
+    fix: echo 'allow=127.0.0.1 10.0.0.0/24' >> /etc/webmin/miniserv.conf && systemctl restart webmin
+    references: [https://doxfer.webmin.com/Webmin/Webmin_Configuration]
+    tests:
+      pass: {packages: {webmin: 2.105}, files: {/etc/webmin/miniserv.conf: "allow=127.0.0.1 10.0.0.0/24\n"}}
+      fail: {packages: {webmin: 2.105}, files: {/etc/webmin/miniserv.conf: "port=10000\n"}}
+
+  - id: webmin:users-file-perms
+    title: Webmin user/password file is readable by other users
+    description: miniserv.users holds the password hashes of Webmin (root-equivalent) accounts.
+    severity: high
+    applies_if: {any: [{package: webmin}, {file: /etc/webmin/miniserv.conf}]}
+    probe: {type: file, path: [/etc/webmin/miniserv.users, /etc/webmin/miniserv.conf]}
+    expect: [mode perm_max 0600]
+    remediation: Restrict the files to root.
+    fix: chmod 0600 {path} && chown root:root {path}
+    references: [https://doxfer.webmin.com/Webmin/Webmin_Configuration]
+    tests:
+      pass: {packages: {webmin: 2.105}, files: {/etc/webmin/miniserv.users: "x"}, meta: {/etc/webmin/miniserv.users: "0600 0 0"}}
+      fail: {packages: {webmin: 2.105}, files: {/etc/webmin/miniserv.users: "x"}, meta: {/etc/webmin/miniserv.users: "0644 0 0"}}
+
+  # ---- Cockpit ------------------------------------------------------------------------
+  - id: cockpit:root-login-allowed
+    title: Cockpit allows root to log in
+    description: /etc/cockpit/disallowed-users (shipped with "root") is missing or no longer lists root, so the web console accepts root passwords.
+    severity: medium
+    applies_if: {package: [cockpit, cockpit-ws]}
+    probe: {type: content, path: /etc/cockpit/disallowed-users, regex: '^\s*root\s*$'}
+    expect: [match eq true]
+    missing: fail
+    missing_evidence: /etc/cockpit/disallowed-users does not exist (root may log in)
+    remediation: List root in /etc/cockpit/disallowed-users and log in as an unprivileged admin that uses sudo.
+    fix: echo root >> /etc/cockpit/disallowed-users
+    references: [https://cockpit-project.org/guide/latest/cockpit.conf.5.html]
+    tests:
+      pass: {packages: {cockpit-ws: 311-1.el9}, files: {/etc/cockpit/disallowed-users: "# List of users which are not allowed to login to Cockpit\nroot\n"}}
+      fail: [{packages: {cockpit-ws: 311-1.el9}, files: {/etc/cockpit/disallowed-users: "# root\n"}}, {packages: {cockpit-ws: 311-1.el9}}]
+      na: {files: {/etc/cockpit/disallowed-users: ""}}
+
+  - id: cockpit:allow-unencrypted
+    title: Cockpit allows unencrypted HTTP logins
+    description: AllowUnencrypted=true lets the web console serve login over plain HTTP from non-localhost clients.
+    severity: high
+    applies_if: {package: [cockpit, cockpit-ws]}
+    probe: {type: config, format: ini, path: /etc/cockpit/cockpit.conf, section: WebService, key: AllowUnencrypted, default: "false"}
+    expect: [value ne true]
+    remediation: Remove AllowUnencrypted (or terminate TLS in a reverse proxy and set Origins/ProtocolHeader accordingly).
+    fix: sed -i '/^AllowUnencrypted/d' /etc/cockpit/cockpit.conf && systemctl restart cockpit.socket
+    references: [https://cockpit-project.org/guide/latest/cockpit.conf.5.html]
+    tests:
+      pass: {packages: {cockpit-ws: 311-1.el9}, files: {/etc/cockpit/cockpit.conf: "[WebService]\nOrigins = https://admin.example.org\n"}}
+      fail: {packages: {cockpit-ws: 311-1.el9}, files: {/etc/cockpit/cockpit.conf: "[WebService]\nAllowUnencrypted = true\n"}}
+
+  # ---- VNC ------------------------------------------------------------------------------
+  - id: vnc:public-listener
+    title: VNC server reachable on a public interface
+    description: VNC authentication is a short DES-based password and the protocol is unencrypted by default; VNC on 5900-5910 should be reached through SSH or a VPN only.
+    severity: high
+    applies_if: {listening: [5900, 5901, 5902, 5903, 5904, 5905, 5906, 5907, 5908, 5909, 5910]}
+    probe: {type: listener, proto: tcp, ports: [5900, 5901, 5902, 5903, 5904, 5905, 5906, 5907, 5908, 5909, 5910]}
+    expect: [loopback eq true]
+    remediation: Bind VNC to localhost (e.g. TigerVNC "localhost" option) and tunnel over SSH, or firewall the ports.
+    fix: "echo 'localhost' >> /etc/tigervnc/vncserver-config-mandatory (TigerVNC) and restart the vncserver@ units"
+    references: [https://tigervnc.org/doc/vncserver.html]
+    tests:
+      pass: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 5 127.0.0.1:5901 0.0.0.0:* users:((\"Xvnc\",pid=3,fd=7))"}}
+      fail: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 5 0.0.0.0:5901 0.0.0.0:* users:((\"Xvnc\",pid=3,fd=7))"}}
+      na: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 5 0.0.0.0:22 0.0.0.0:*"}}
+
+  - id: vnc:no-auth
+    title: VNC server configured without authentication
+    description: SecurityTypes includes None, so anyone who reaches the VNC port gets the desktop session without a password.
+    severity: critical
+    applies_if: {any: [{package: [tigervnc-server, tigervnc-standalone-server]}, {file: /etc/tigervnc}]}
+    probe: {type: content, path: [/etc/tigervnc/vncserver-config-defaults, /etc/tigervnc/vncserver-config-mandatory, /root/.vnc/config, /home/*/.vnc/config, /home/*/.config/tigervnc/config], regex: '(?i)^\s*\$?securitytypes\s*=\s*["'']?[^#\n]*\bnone\b'}
+    expect: [match eq false]
+    remediation: Require VncAuth/TLSVnc (and bind to localhost behind SSH).
+    fix: "set securitytypes=vncauth,tlsvnc in {path} and restart the VNC session"
+    references: [https://tigervnc.org/doc/Xvnc.html]
+    tests:
+      pass: {packages: {tigervnc-server: 1.13.1-8.el9}, files: {/etc/tigervnc/vncserver-config-defaults: "session=gnome\nsecuritytypes=vncauth,tlsvnc\n"}}
+      fail: {packages: {tigervnc-server: 1.13.1-8.el9}, files: {/home/alice/.vnc/config: "securitytypes=None\n"}}
+
+  - id: vnc:passwd-perms
+    title: VNC password file is readable by other users
+    description: ~/.vnc/passwd is only obfuscated with a fixed DES key, so anyone who can read it recovers the VNC password.
+    severity: medium
+    applies_if: {file: [/root/.vnc/passwd, /home/*/.vnc/passwd, /home/*/.config/tigervnc/passwd]}
+    probe: {type: file, path: [/root/.vnc/passwd, /home/*/.vnc/passwd, /home/*/.config/tigervnc/passwd]}
+    expect: [mode perm_max 0600]
+    remediation: Restrict the password file to its owner and change the VNC password.
+    fix: chmod 0600 {path} && vncpasswd
+    references: [https://tigervnc.org/doc/vncpasswd.html]
+    tests:
+      pass: {files: {/home/alice/.vnc/passwd: "x"}, meta: {/home/alice/.vnc/passwd: "0600 1000 1000"}}
+      fail: {files: {/home/alice/.vnc/passwd: "x"}, meta: {/home/alice/.vnc/passwd: "0644 1000 1000"}}
+      na: {files: {/home/alice/.bashrc: "x"}}
+
+  # ---- xrdp ---------------------------------------------------------------------------------
+  - id: xrdp:rdp-security-layer
+    title: xrdp uses the legacy RDP security layer (no TLS)
+    description: security_layer=rdp uses RDP's own weak encryption without server authentication, allowing machine-in-the-middle capture of credentials.
+    severity: high
+    applies_if: {package: xrdp}
+    probe: {type: config, format: ini, path: /etc/xrdp/xrdp.ini, section: Globals, key: security_layer, default: negotiate}
+    expect: [value ne rdp]
+    remediation: Use TLS (security_layer=tls or negotiate) with a proper certificate.
+    fix: "set security_layer=tls (and certificate=/key_file=) in [Globals] of /etc/xrdp/xrdp.ini, then systemctl restart xrdp"
+    references: [https://github.com/neutrinolabs/xrdp/blob/devel/xrdp/xrdp.ini.in]
+    tests:
+      pass: {packages: {xrdp: 0.9.24-1}, files: {/etc/xrdp/xrdp.ini: "[Globals]\nsecurity_layer=negotiate\n"}}
+      fail: {packages: {xrdp: 0.9.24-1}, files: {/etc/xrdp/xrdp.ini: "[Globals]\nsecurity_layer=rdp\n"}}
+
+  - id: xrdp:low-crypt-level
+    title: xrdp uses low or no RDP encryption
+    description: crypt_level none/low/medium weakens or disables encryption when the RDP security layer is negotiated.
+    severity: medium
+    applies_if: {package: xrdp}
+    probe: {type: config, format: ini, path: /etc/xrdp/xrdp.ini, section: Globals, key: crypt_level, default: high}
+    expect: ['value in high,fips']
+    remediation: Set crypt_level=high (and prefer TLS).
+    fix: "set crypt_level=high in [Globals] of /etc/xrdp/xrdp.ini, then systemctl restart xrdp"
+    references: [https://github.com/neutrinolabs/xrdp/blob/devel/xrdp/xrdp.ini.in]
+    tests:
+      pass: {packages: {xrdp: 0.9.24-1}, files: {/etc/xrdp/xrdp.ini: "[Globals]\ncrypt_level=high\n"}}
+      fail: {packages: {xrdp: 0.9.24-1}, files: {/etc/xrdp/xrdp.ini: "[Globals]\ncrypt_level=low\n"}}
+
+  - id: xrdp:root-login
+    title: xrdp allows root desktop logins
+    description: AllowRootLogin defaults to true in sesman.ini, so root can log in to a graphical session over RDP with a password.
+    severity: medium
+    applies_if: {package: xrdp}
+    probe: {type: config, format: ini, path: /etc/xrdp/sesman.ini, section: Security, key: AllowRootLogin, default: "true"}
+    expect: ['value in false,no,0']
+    remediation: Disallow root logins over RDP.
+    fix: "set AllowRootLogin=false in [Security] of /etc/xrdp/sesman.ini, then systemctl restart xrdp-sesman"
+    references: [https://github.com/neutrinolabs/xrdp/blob/devel/sesman/sesman.ini.in]
+    tests:
+      pass: {packages: {xrdp: 0.9.24-1}, files: {/etc/xrdp/sesman.ini: "[Security]\nAllowRootLogin=false\n"}}
+      fail: {packages: {xrdp: 0.9.24-1}, files: {/etc/xrdp/sesman.ini: "[Security]\nMaxLoginRetry=4\n"}}
+
+  # ---- X11 --------------------------------------------------------------------------------------
+  - id: x11:tcp-listener
+    title: X server accepts TCP connections from the network
+    description: An X server listening on TCP 6000+ lets remote clients (subject only to xhost/MIT cookies) capture keystrokes and screen contents.
+    severity: high
+    applies_if: {listening: [6000, 6001, 6002, 6003, 6004, 6005, 6006, 6007, 6008, 6009, 6010]}
+    probe: {type: listener, proto: tcp, ports: [6000, 6001, 6002, 6003, 6004, 6005, 6006, 6007, 6008, 6009, 6010]}
+    expect: [loopback eq true]
+    remediation: Start X with -nolisten tcp (the default on current Xorg/display managers) and use SSH X11 forwarding instead.
+    fix: "set DisallowTCP=true in the display manager config (GDM [security], LightDM xserver-allow-tcp=false) and restart it"
+    references: [https://www.x.org/releases/current/doc/man/man1/Xserver.1.xhtml]
+    tests:
+      pass: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 5 127.0.0.1:6010 0.0.0.0:* users:((\"sshd\",pid=3,fd=7))"}}
+      fail: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 5 0.0.0.0:6000 0.0.0.0:* users:((\"Xorg\",pid=3,fd=7))"}}
+      na: {cmds: {"ss -H -tulnp": "tcp LISTEN 0 5 0.0.0.0:22 0.0.0.0:*"}}

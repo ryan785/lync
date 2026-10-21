@@ -1,0 +1,200 @@
+pack: ftp
+title: FTP servers (vsftpd, ProFTPD, Pure-FTPd)
+description: Anonymous access and uploads, logins without TLS, FTP bounce settings, root logins and version disclosure. vsftpd fix commands use the RHEL path /etc/vsftpd/vsftpd.conf; Debian/Ubuntu use /etc/vsftpd.conf.
+category: network
+references:
+  - https://security.appspot.com/vsftpd/vsftpd_conf.html
+  - http://www.proftpd.org/docs/
+checks:
+  # ---- vsftpd ---------------------------------------------------------------------
+  - id: vsftpd:anonymous
+    title: vsftpd allows anonymous logins
+    description: anonymous_enable=YES (the upstream default) lets anyone log in as "anonymous" and read the FTP root.
+    severity: high
+    level: basic
+    applies_if: {package: vsftpd}
+    probe: {type: config, format: kv, path: [/etc/vsftpd.conf, /etc/vsftpd/vsftpd.conf], key: anonymous_enable, default: "YES"}
+    expect: [value eq no]
+    remediation: Disable anonymous FTP unless the server is a deliberate public mirror.
+    fix: sed -i 's/^anonymous_enable=.*/anonymous_enable=NO/' /etc/vsftpd/vsftpd.conf && systemctl restart vsftpd
+    references: [https://security.appspot.com/vsftpd/vsftpd_conf.html]
+    tests:
+      pass: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "anonymous_enable=NO\nlocal_enable=YES\n"}}
+      fail: [{packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "anonymous_enable=YES\n"}}, {packages: {vsftpd: 3.0.3-13}, files: {/etc/vsftpd.conf: "listen=YES\n"}}]
+      na: {files: {/etc/vsftpd.conf: "anonymous_enable=YES\n"}}
+
+  - id: vsftpd:anonymous-upload
+    title: vsftpd allows anonymous uploads
+    description: anon_upload_enable=YES with write_enable=YES lets anonymous users upload files, which is routinely abused to host malware and pirated content.
+    severity: high
+    applies_if: {package: vsftpd}
+    probe: {type: config, format: kv, path: [/etc/vsftpd.conf, /etc/vsftpd/vsftpd.conf], keys: [anon_upload_enable, write_enable], default: "NO"}
+    expect: ['anon_upload_enable ne yes || write_enable ne yes']
+    remediation: Disable anonymous uploads.
+    fix: sed -i 's/^anon_upload_enable=.*/anon_upload_enable=NO/' /etc/vsftpd/vsftpd.conf && systemctl restart vsftpd
+    references: [https://security.appspot.com/vsftpd/vsftpd_conf.html]
+    tests:
+      pass: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "anonymous_enable=NO\nwrite_enable=YES\n"}}
+      fail: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "anonymous_enable=YES\nwrite_enable=YES\nanon_upload_enable=YES\n"}}
+
+  - id: vsftpd:anonymous-mkdir
+    title: vsftpd lets anonymous users create directories
+    description: anon_mkdir_write_enable=YES with write_enable=YES lets anonymous users create directories in writable areas.
+    severity: medium
+    applies_if: {package: vsftpd}
+    probe: {type: config, format: kv, path: [/etc/vsftpd.conf, /etc/vsftpd/vsftpd.conf], keys: [anon_mkdir_write_enable, write_enable], default: "NO"}
+    expect: ['anon_mkdir_write_enable ne yes || write_enable ne yes']
+    remediation: Disable anonymous directory creation.
+    fix: sed -i 's/^anon_mkdir_write_enable=.*/anon_mkdir_write_enable=NO/' /etc/vsftpd/vsftpd.conf && systemctl restart vsftpd
+    references: [https://security.appspot.com/vsftpd/vsftpd_conf.html]
+    tests:
+      pass: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "anon_mkdir_write_enable=NO\nwrite_enable=YES\n"}}
+      fail: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "anon_mkdir_write_enable=YES\nwrite_enable=YES\n"}}
+
+  - id: vsftpd:no-tls
+    title: vsftpd local logins without TLS
+    description: Local users can log in (local_enable=YES) but ssl_enable is not YES, so their system passwords travel in clear text.
+    severity: high
+    applies_if: {package: vsftpd}
+    probe: {type: config, format: kv, path: [/etc/vsftpd.conf, /etc/vsftpd/vsftpd.conf], keys: [ssl_enable, local_enable], default: "NO"}
+    where: [local_enable eq yes]
+    expect: [ssl_enable eq yes]
+    remediation: Enable TLS (or replace FTP with SFTP over SSH).
+    fix: "printf 'ssl_enable=YES\\nrsa_cert_file=/etc/pki/tls/certs/vsftpd.pem\\nrsa_private_key_file=/etc/pki/tls/private/vsftpd.key\\n' >> /etc/vsftpd/vsftpd.conf && systemctl restart vsftpd"
+    references: [https://security.appspot.com/vsftpd/vsftpd_conf.html]
+    tests:
+      pass: [{packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "local_enable=YES\nssl_enable=YES\n"}}, {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "anonymous_enable=NO\n"}}]
+      fail: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "local_enable=YES\n"}}
+
+  - id: vsftpd:tls-optional-for-logins
+    title: vsftpd lets local users log in without TLS even though TLS is enabled
+    description: force_local_logins_ssl=NO (and/or force_local_data_ssl=NO) makes TLS optional, so clients can still send passwords in clear text.
+    severity: medium
+    applies_if: {package: vsftpd}
+    probe: {type: config, format: kv, path: [/etc/vsftpd.conf, /etc/vsftpd/vsftpd.conf], keys: [force_local_logins_ssl, ssl_enable], default: "YES"}
+    where: [ssl_enable eq yes]
+    expect: [force_local_logins_ssl eq yes]
+    remediation: Force TLS for local logins and data.
+    fix: "printf 'force_local_logins_ssl=YES\\nforce_local_data_ssl=YES\\n' >> /etc/vsftpd/vsftpd.conf && systemctl restart vsftpd"
+    references: [https://security.appspot.com/vsftpd/vsftpd_conf.html]
+    tests:
+      pass: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "ssl_enable=YES\n"}}
+      fail: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "ssl_enable=YES\nforce_local_logins_ssl=NO\n"}}
+
+  - id: vsftpd:sslv3
+    title: vsftpd enables SSLv3/SSLv2
+    description: ssl_sslv3=YES or ssl_sslv2=YES re-enables protocols broken by POODLE/DROWN.
+    severity: medium
+    applies_if: {package: vsftpd}
+    probe: {type: config, format: kv, path: [/etc/vsftpd.conf, /etc/vsftpd/vsftpd.conf], keys: [ssl_sslv3, ssl_sslv2], default: "NO"}
+    expect: ['ssl_sslv3 ne yes', 'ssl_sslv2 ne yes']
+    remediation: Disable SSL protocol versions.
+    fix: "sed -i -e 's/^ssl_sslv3=.*/ssl_sslv3=NO/' -e 's/^ssl_sslv2=.*/ssl_sslv2=NO/' /etc/vsftpd/vsftpd.conf && systemctl restart vsftpd"
+    references: [https://security.appspot.com/vsftpd/vsftpd_conf.html]
+    tests:
+      pass: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "ssl_enable=YES\nssl_tlsv1_2=YES\n"}}
+      fail: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "ssl_enable=YES\nssl_sslv3=YES\n"}}
+
+  - id: vsftpd:no-chroot
+    title: vsftpd does not chroot local users
+    description: Without chroot_local_user=YES, FTP users can browse the whole filesystem (configs, other users' world-readable files).
+    severity: low
+    applies_if: {package: vsftpd}
+    probe: {type: config, format: kv, path: [/etc/vsftpd.conf, /etc/vsftpd/vsftpd.conf], keys: [chroot_local_user, local_enable], default: "NO"}
+    where: [local_enable eq yes]
+    expect: [chroot_local_user eq yes]
+    remediation: Confine local users to their home directory.
+    fix: "echo 'chroot_local_user=YES' >> /etc/vsftpd/vsftpd.conf && systemctl restart vsftpd"
+    references: [https://security.appspot.com/vsftpd/vsftpd_conf.html]
+    tests:
+      pass: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "local_enable=YES\nchroot_local_user=YES\n"}}
+      fail: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "local_enable=YES\n"}}
+
+  - id: vsftpd:ftp-bounce
+    title: vsftpd allows FTP bounce (promiscuous PORT/PASV)
+    description: port_promiscuous=YES or pasv_promiscuous=YES disables the check that data connections go to the client's own address, enabling FTP bounce port scans and relaying.
+    severity: medium
+    applies_if: {package: vsftpd}
+    probe: {type: config, format: kv, path: [/etc/vsftpd.conf, /etc/vsftpd/vsftpd.conf], keys: [port_promiscuous, pasv_promiscuous], default: "NO"}
+    expect: ['port_promiscuous ne yes', 'pasv_promiscuous ne yes']
+    remediation: Turn the promiscuous options off.
+    fix: "sed -i -e 's/^port_promiscuous=.*/port_promiscuous=NO/' -e 's/^pasv_promiscuous=.*/pasv_promiscuous=NO/' /etc/vsftpd/vsftpd.conf && systemctl restart vsftpd"
+    references:
+      - https://security.appspot.com/vsftpd/vsftpd_conf.html
+      - https://www.cve.org/CVERecord?id=CVE-1999-0017
+    tests:
+      pass: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "listen=YES\n"}}
+      fail: {packages: {vsftpd: 3.0.5-5.el9}, files: {/etc/vsftpd/vsftpd.conf: "port_promiscuous=YES\n"}}
+
+  # ---- ProFTPD --------------------------------------------------------------------
+  - id: proftpd:anonymous
+    title: ProFTPD has an anonymous FTP section
+    description: An active <Anonymous> block allows logins without a password.
+    severity: high
+    level: basic
+    applies_if: {package: [proftpd, proftpd-basic, proftpd-core]}
+    probe: {type: content, combine: true, path: [/etc/proftpd.conf, /etc/proftpd/proftpd.conf, /etc/proftpd/conf.d/*.conf], regex: '(?i)^\s*<Anonymous\b'}
+    expect: [match eq false]
+    remediation: Remove or comment out the <Anonymous> section unless anonymous FTP is intended.
+    fix: comment out the <Anonymous ...> ... </Anonymous> block and systemctl restart proftpd
+    references: [http://www.proftpd.org/docs/howto/Anonymous.html]
+    tests:
+      pass: {packages: {proftpd: 1.3.8-1}, files: {/etc/proftpd/proftpd.conf: "ServerName x\n# <Anonymous ~ftp>\n"}}
+      fail: {packages: {proftpd-core: 1.3.8-1}, files: {/etc/proftpd/proftpd.conf: "<Anonymous ~ftp>\n  User ftp\n</Anonymous>\n"}}
+
+  - id: proftpd:root-login
+    title: ProFTPD permits root logins
+    description: RootLogin on lets root authenticate over FTP, usually without encryption.
+    severity: high
+    applies_if: {package: [proftpd, proftpd-basic, proftpd-core]}
+    probe: {type: content, combine: true, path: [/etc/proftpd.conf, /etc/proftpd/proftpd.conf, /etc/proftpd/conf.d/*.conf], regex: '(?i)^\s*RootLogin\s+on\b'}
+    expect: [match eq false]
+    remediation: Remove RootLogin on (root logins are refused by default).
+    fix: sed -i 's/^\s*RootLogin\s\+on/RootLogin off/I' /etc/proftpd/proftpd.conf && systemctl restart proftpd
+    references: [http://www.proftpd.org/docs/directives/linked/config_ref_RootLogin.html]
+    tests:
+      pass: {packages: {proftpd: 1.3.8-1}, files: {/etc/proftpd.conf: "ServerName x\n"}}
+      fail: {packages: {proftpd: 1.3.8-1}, files: {/etc/proftpd.conf: "RootLogin on\n"}}
+
+  - id: proftpd:no-tls
+    title: ProFTPD does not enable TLS
+    description: No TLSEngine on in the configuration, so logins and data are sent in clear text.
+    severity: medium
+    applies_if: {package: [proftpd, proftpd-basic, proftpd-core]}
+    probe: {type: content, combine: true, path: [/etc/proftpd.conf, /etc/proftpd/proftpd.conf, /etc/proftpd/tls.conf, /etc/proftpd/conf.d/*.conf], regex: '(?i)^\s*TLSEngine\s+on\b'}
+    expect: [match eq true]
+    remediation: Enable mod_tls with a certificate and TLSRequired on (or switch to SFTP).
+    fix: "in /etc/proftpd/tls.conf set TLSEngine on, TLSRequired on, TLSProtocol TLSv1.2 TLSv1.3 and the certificate paths; include it from proftpd.conf; systemctl restart proftpd"
+    references: [http://www.proftpd.org/docs/howto/TLS.html]
+    tests:
+      pass: {packages: {proftpd: 1.3.8-1}, files: {/etc/proftpd/proftpd.conf: "Include /etc/proftpd/tls.conf\n", /etc/proftpd/tls.conf: "TLSEngine on\nTLSRequired on\n"}}
+      fail: {packages: {proftpd: 1.3.8-1}, files: {/etc/proftpd/proftpd.conf: "ServerName x\n", /etc/proftpd/tls.conf: "#TLSEngine on\n"}}
+
+  - id: proftpd:server-ident
+    title: ProFTPD advertises its version
+    description: ServerIdent defaults to on with the version string, which points attackers at version-specific exploits (e.g. mod_copy CVE-2015-3306, CVE-2019-12815).
+    severity: low
+    applies_if: {package: [proftpd, proftpd-basic, proftpd-core]}
+    probe: {type: content, combine: true, path: [/etc/proftpd.conf, /etc/proftpd/proftpd.conf, /etc/proftpd/conf.d/*.conf], regex: '(?i)^\s*ServerIdent\s+(off|on\s+")'}
+    expect: [match eq true]
+    remediation: Hide the version in the greeting.
+    fix: 'echo ''ServerIdent on "FTP server ready"'' >> /etc/proftpd/proftpd.conf && systemctl restart proftpd'
+    references: [http://www.proftpd.org/docs/directives/linked/config_ref_ServerIdent.html]
+    tests:
+      pass: {packages: {proftpd: 1.3.8-1}, files: {/etc/proftpd/proftpd.conf: "ServerIdent off\n"}}
+      fail: {packages: {proftpd: 1.3.8-1}, files: {/etc/proftpd/proftpd.conf: "ServerName x\n"}}
+
+  # ---- Pure-FTPd ------------------------------------------------------------------
+  - id: pureftpd:anonymous
+    title: Pure-FTPd allows anonymous logins
+    description: Pure-FTPd accepts anonymous logins unless NoAnonymous is set (pure-ftpd.conf on RHEL, /etc/pure-ftpd/conf/NoAnonymous on Debian).
+    severity: high
+    applies_if: {package: [pure-ftpd, pure-ftpd-common]}
+    probe: {type: content, combine: true, path: [/etc/pure-ftpd/pure-ftpd.conf, /etc/pure-ftpd.conf, /etc/pure-ftpd/conf/NoAnonymous], regex: '(?i)^\s*(NoAnonymous\s+)?yes\s*$'}
+    expect: [match eq true]
+    remediation: Turn anonymous FTP off.
+    fix: echo yes > /etc/pure-ftpd/conf/NoAnonymous (Debian) or set NoAnonymous yes in pure-ftpd.conf, then restart pure-ftpd
+    references: [https://www.pureftpd.org/project/pure-ftpd/doc/]
+    tests:
+      pass: [{packages: {pure-ftpd: 1.0.50-1}, files: {/etc/pure-ftpd/conf/NoAnonymous: "yes\n"}}, {packages: {pure-ftpd: 1.0.50-1}, files: {/etc/pure-ftpd/pure-ftpd.conf: "ChrootEveryone yes\nNoAnonymous yes\n"}}]
+      fail: {packages: {pure-ftpd: 1.0.50-1}, files: {/etc/pure-ftpd/pure-ftpd.conf: "ChrootEveryone yes\nNoAnonymous no\n"}}

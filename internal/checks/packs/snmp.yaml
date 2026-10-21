@@ -1,0 +1,78 @@
+pack: snmp
+title: SNMP agent (net-snmp)
+description: Default and write communities, unrestricted community sources, exposure of the agent and permissions of snmpd.conf.
+category: network
+applies_if: {package: [net-snmp, snmpd]}
+references:
+  - http://www.net-snmp.org/docs/man/snmpd.conf.html
+test_base:
+  packages: {net-snmp: 5.9.1-13.el9}
+checks:
+  - id: snmp:default-community
+    title: SNMP uses a default community string (public/private)
+    description: The community "public" or "private" is the first thing scanners try (CVE-1999-0517). Read access leaks interfaces, routes, processes and installed software; write access (rwcommunity) is Critical.
+    severity: medium
+    level: basic
+    probe: {type: content, path: [/etc/snmp/snmpd.conf, /etc/snmp/snmpd.conf.d/*.conf], regex: '(?i)^\s*(rocommunity6?|rwcommunity6?)\s+(public|private)\b|^\s*com2sec6?\s+(-Cn\s+\S+\s+)?\S+\s+\S+\s+(public|private)\b'}
+    expect: [match eq false]
+    severity_if:
+      - {when: 'line regex (?i)^rwcommunity', severity: critical}
+    remediation: Replace the default community with a long random string limited to your monitoring hosts, or better use SNMPv3 users with authPriv.
+    fix: "replace the line with e.g. 'rocommunity <random-string> 10.0.0.5' (or 'rouser monitor authPriv'), then systemctl restart snmpd"
+    references:
+      - https://www.cve.org/CVERecord?id=CVE-1999-0517
+    tests:
+      pass: {files: {/etc/snmp/snmpd.conf: "rocommunity lync-test-secret 10.0.0.5\n"}}
+      fail:
+        - {files: {/etc/snmp/snmpd.conf: "com2sec notConfigUser  default       public\n"}}
+        - {files: {/etc/snmp/snmpd.conf: "rwcommunity private 10.0.0.0/8\n"}, severity: critical}
+      na: {packages: {bash: 5.1-1, net-snmp: "!absent"}, files: {/etc/snmp/snmpd.conf: "rocommunity public\n"}}
+
+  - id: snmp:write-community
+    title: SNMP grants write access with a community string
+    description: rwcommunity allows SET operations authenticated only by a community string sent in clear text, so anyone who sniffs or guesses it can change device configuration.
+    severity: high
+    probe: {type: content, secret: true, path: [/etc/snmp/snmpd.conf, /etc/snmp/snmpd.conf.d/*.conf], regex: '(?i)^\s*rwcommunity6?\s+\S+'}
+    expect: [match eq false]
+    remediation: Remove rwcommunity; if writes are needed use an SNMPv3 rwuser with authPriv.
+    fix: "delete the rwcommunity line, add 'rwuser admin authPriv' if needed, then systemctl restart snmpd"
+    tests:
+      pass: {files: {/etc/snmp/snmpd.conf: "rocommunity lync-test-secret 10.0.0.5\n"}}
+      fail: {files: {/etc/snmp/snmpd.conf: "rwcommunity lync-test-secret 10.0.0.5\n"}}
+
+  - id: snmp:community-any-source
+    title: SNMP community accepted from any address
+    description: An rocommunity/rwcommunity line without a source (or with "default") answers requests from anywhere, so the community string is the only protection.
+    severity: medium
+    probe: {type: content, secret: true, path: [/etc/snmp/snmpd.conf, /etc/snmp/snmpd.conf.d/*.conf], regex: '(?i)^\s*r[ow]community6?\s+\S+\s*(default\s*)?$'}
+    expect: [match eq false]
+    remediation: Add the monitoring host or subnet as the source of each community.
+    fix: "change the line to 'rocommunity <string> 10.0.0.5', then systemctl restart snmpd"
+    tests:
+      pass: {files: {/etc/snmp/snmpd.conf: "rocommunity lync-test-secret 10.0.0.5\n"}}
+      fail: [{files: {/etc/snmp/snmpd.conf: "rocommunity lync-test-secret\n"}}, {files: {/etc/snmp/snmpd.conf: "rocommunity lync-test-secret default\n"}}]
+
+  - id: snmp:config-readable
+    title: snmpd.conf is readable by other users
+    description: snmpd.conf contains community strings and SNMPv3 credentials; distributions ship it 0600.
+    severity: medium
+    probe: {type: file, path: [/etc/snmp/snmpd.conf, /etc/snmp/snmpd.conf.d/*.conf, /var/lib/net-snmp/snmpd.conf, /var/lib/snmp/snmpd.conf]}
+    expect: [mode perm_max 0640]
+    remediation: Restrict the file to root.
+    fix: chmod 0600 {path}
+    tests:
+      pass: {files: {/etc/snmp/snmpd.conf: "x\n"}, meta: {/etc/snmp/snmpd.conf: "0600 0 0"}}
+      fail: {files: {/etc/snmp/snmpd.conf: "x\n"}, meta: {/etc/snmp/snmpd.conf: "0644 0 0"}}
+
+  - id: snmp:public-listener
+    title: snmpd listens on a non-loopback address
+    description: The SNMP agent answers on network interfaces; make sure only monitoring hosts can reach UDP 161 (firewall plus source-restricted communities or SNMPv3).
+    severity: low
+    probe: {type: listener, ports: [161], process: '^snmpd$'}
+    expect: [loopback eq true]
+    remediation: Bind snmpd to localhost if it is only queried locally, otherwise firewall UDP 161 to the monitoring hosts.
+    fix: "agentaddress udp:127.0.0.1:161 in snmpd.conf (or firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=10.0.0.5 port port=161 protocol=udp accept')"
+    tests:
+      pass: {cmds: {"ss -H -tulnp": "udp UNCONN 0 0 127.0.0.1:161 0.0.0.0:* users:((\"snmpd\",pid=5,fd=6))"}}
+      fail: {cmds: {"ss -H -tulnp": "udp UNCONN 0 0 0.0.0.0:161 0.0.0.0:* users:((\"snmpd\",pid=5,fd=6))"}}
+      skip: {files: {}}

@@ -1,0 +1,248 @@
+pack: firewall
+title: Host firewall (firewalld, nftables, iptables, ufw)
+description: Host firewall managers that are installed but not filtering, permissive default policies and conflicting managers. "No firewall at all" is the Go check firewall:none-active.
+category: network
+references:
+  - https://firewalld.org/documentation/
+  - https://wiki.nftables.org/wiki-nftables/index.php/Main_Page
+checks:
+  - id: firewall:firewalld-enabled-not-running
+    title: firewalld is enabled but not running
+    description: firewalld is enabled at boot but its service is not active (failed or stopped), so the zones you configured are not being enforced.
+    severity: high
+    level: basic
+    applies_if: {package: firewalld}
+    probe: {type: systemd, name: firewalld.service}
+    expect: ['ActiveState eq active || UnitFileState ne enabled']
+    remediation: Find out why firewalld stopped (journalctl -u firewalld), fix the error and start it.
+    fix: systemctl start firewalld && firewall-cmd --state
+    references: [https://firewalld.org/documentation/man-pages/firewalld.html]
+    tests:
+      pass:
+        packages: {firewalld: 1.3.4-1.el9}
+        cmds: {"systemctl show firewalld.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"}
+      fail:
+        packages: {firewalld: 1.3.4-1.el9}
+        cmds: {"systemctl show firewalld.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=failed\nUnitFileState=enabled\n"}
+      na: {packages: {bash: 5.1-1}}
+
+  - id: firewall:firewalld-default-zone-trusted
+    title: firewalld default zone is "trusted" (accepts all traffic)
+    description: The trusted zone accepts every packet, so interfaces in the default zone are not filtered at all.
+    severity: high
+    level: basic
+    applies_if: {unit_active: firewalld}
+    probe: {type: command, cmd: [firewall-cmd, --get-default-zone]}
+    expect: [output ne trusted]
+    remediation: Use a filtering zone (public or drop) as the default and open only the services you need.
+    fix: firewall-cmd --set-default-zone=public
+    references: [https://firewalld.org/documentation/zone/predefined-zones.html]
+    tests:
+      pass: {cmds: {"systemctl is-active firewalld.service": "active", "firewall-cmd --get-default-zone": "public\n"}}
+      fail: {cmds: {"systemctl is-active firewalld.service": "active", "firewall-cmd --get-default-zone": "trusted\n"}}
+      na: {cmds: {"firewall-cmd --get-default-zone": "trusted\n"}}
+      skip: {cmds: {"systemctl is-active firewalld.service": "active"}}
+
+  - id: firewall:firewalld-zone-target-accept
+    title: firewalld default zone target is ACCEPT
+    description: A zone whose target is ACCEPT lets through every packet that no rule matched, which disables filtering for that zone.
+    severity: high
+    applies_if: {unit_active: firewalld}
+    probe: {type: command, cmd: [firewall-cmd, --list-all]}
+    where: ['output not_regex ^trusted\b']
+    expect: ['output not_regex (?m)^\s*target:\s*ACCEPT\s*$']
+    remediation: Set the zone target back to default (reject unmatched packets) and add explicit services/ports instead.
+    fix: firewall-cmd --permanent --zone=<zone> --set-target=default && firewall-cmd --reload
+    references: [https://firewalld.org/documentation/man-pages/firewall-cmd.html]
+    tests:
+      pass: {cmds: {"systemctl is-active firewalld.service": "active", "firewall-cmd --list-all": "public (active)\n  target: default\n  services: ssh\n"}}
+      fail: {cmds: {"systemctl is-active firewalld.service": "active", "firewall-cmd --list-all": "public (active)\n  target: ACCEPT\n  services: ssh\n"}}
+      na: {cmds: {"firewall-cmd --list-all": "public (active)\n  target: ACCEPT\n"}}
+
+  - id: firewall:firewalld-zone-drifting
+    title: firewalld AllowZoneDrifting is enabled
+    description: With AllowZoneDrifting=yes, packets not handled by a source-based zone fall through to the interface zone, so a restrictive source zone can be bypassed. The option is deprecated and should be off.
+    severity: medium
+    applies_if: {package: firewalld}
+    probe: {type: config, format: kv, path: /etc/firewalld/firewalld.conf, key: AllowZoneDrifting, default: "no"}
+    expect: [value ne yes]
+    remediation: Set AllowZoneDrifting=no in /etc/firewalld/firewalld.conf and reload firewalld.
+    fix: sed -i 's/^AllowZoneDrifting=.*/AllowZoneDrifting=no/' /etc/firewalld/firewalld.conf && firewall-cmd --reload
+    references: [https://firewalld.org/2020/01/allowzonedrifting]
+    tests:
+      pass: {packages: {firewalld: 0.9.3-1}, files: {/etc/firewalld/firewalld.conf: "DefaultZone=public\nAllowZoneDrifting=no\n"}}
+      fail: {packages: {firewalld: 0.9.3-1}, files: {/etc/firewalld/firewalld.conf: "DefaultZone=public\nAllowZoneDrifting=yes\n"}}
+      na: {files: {/etc/firewalld/firewalld.conf: "AllowZoneDrifting=yes\n"}}
+
+  - id: firewall:firewalld-log-denied-off
+    title: firewalld does not log denied packets
+    description: LogDenied=off means rejected and dropped packets leave no trace, which hides scans and blocked attacks.
+    severity: low
+    level: strict
+    applies_if: {package: firewalld}
+    probe: {type: config, format: kv, path: /etc/firewalld/firewalld.conf, key: LogDenied, default: "off"}
+    expect: [value ne off]
+    remediation: Log denied unicast packets (rate-limited by the kernel log).
+    fix: firewall-cmd --set-log-denied=unicast
+    references: [https://firewalld.org/documentation/man-pages/firewalld.conf.html]
+    tests:
+      pass: {packages: {firewalld: 1.3.4-1}, files: {/etc/firewalld/firewalld.conf: "LogDenied=unicast\n"}}
+      fail: {packages: {firewalld: 1.3.4-1}, files: {/etc/firewalld/firewalld.conf: "DefaultZone=public\n"}}
+
+  - id: firewall:conflicting-managers
+    title: Another firewall service runs alongside firewalld
+    description: iptables/ip6tables/nftables/ufw services loading their own rulesets next to firewalld flush or override firewalld's rules (nftables.service flushes the whole ruleset on restart).
+    severity: medium
+    applies_if: {unit_active: firewalld}
+    probe: {type: systemd, name: [iptables.service, ip6tables.service, nftables.service, ufw.service]}
+    expect: [ActiveState ne active]
+    remediation: Use one firewall manager. Disable the other service and keep the rules in firewalld.
+    fix: systemctl disable --now {unit}
+    references: [https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/configuring_firewalls_and_packet_filters/getting-started-with-nftables_firewall-packet-filters]
+    tests:
+      pass:
+        cmds:
+          "systemctl is-active firewalld.service": active
+          "systemctl show iptables.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+          "systemctl show ip6tables.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+          "systemctl show nftables.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n"
+          "systemctl show ufw.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+      fail:
+        cmds:
+          "systemctl is-active firewalld.service": active
+          "systemctl show iptables.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
+          "systemctl show ip6tables.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+          "systemctl show nftables.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
+          "systemctl show ufw.service --property=LoadState,ActiveState,UnitFileState": "LoadState=not-found\n"
+        findings: 2
+      na: {cmds: {"systemctl is-active nftables.service": active}}
+
+  - id: firewall:nftables-empty
+    title: nftables.service is active but no ruleset is loaded
+    description: The nftables service runs but the kernel ruleset is empty, so nothing is filtered (the rules file failed to load or is empty).
+    severity: high
+    applies_if:
+      unit_active: nftables
+      not: {unit_active: [firewalld, ufw]}
+    probe: {type: command, cmd: [nft, list, ruleset]}
+    expect: [output not_empty]
+    remediation: Check the ruleset file named by nftables.service (nft -c -f <file>), fix it and restart the service.
+    fix: nft -c -f /etc/nftables.conf && systemctl restart nftables
+    references: [https://wiki.nftables.org/wiki-nftables/index.php/Main_Page]
+    tests:
+      pass: {cmds: {"systemctl is-active nftables.service": active, "nft list ruleset": "table inet filter {\n chain input {\n  type filter hook input priority filter; policy drop;\n }\n}\n"}}
+      fail: {cmds: {"systemctl is-active nftables.service": active, "nft list ruleset": ""}}
+      na: {cmds: {"systemctl is-active nftables.service": active, "systemctl is-active firewalld.service": active, "nft list ruleset": ""}}
+
+  - id: firewall:nftables-permissive-default
+    title: nftables runs the permissive default ruleset (no drop or reject)
+    description: Debian's stock /etc/nftables.conf defines input/forward/output chains with no policy and no drop rule, so enabling nftables.service filters nothing.
+    severity: medium
+    applies_if:
+      os: debian
+      unit_active: nftables
+      not: {unit_active: [firewalld, ufw]}
+    probe: {type: content, path: /etc/nftables.conf, regex: '\b(drop|reject)\b'}
+    expect: [match eq true]
+    remediation: Give the input chain a drop policy (policy drop;) and accept only established traffic, loopback and the services you run.
+    fix: "edit /etc/nftables.conf (chain input { type filter hook input priority filter; policy drop; ct state established,related accept; iif lo accept; tcp dport 22 accept; }) then nft -c -f /etc/nftables.conf && systemctl restart nftables"
+    references: [https://wiki.debian.org/nftables]
+    tests:
+      pass: {os: "debian:12", cmds: {"systemctl is-active nftables.service": active}, files: {/etc/nftables.conf: "table inet filter {\n chain input {\n  type filter hook input priority filter; policy drop;\n }\n}\n"}}
+      fail: {os: "debian:12", cmds: {"systemctl is-active nftables.service": active}, files: {/etc/nftables.conf: "#!/usr/sbin/nft -f\nflush ruleset\ntable inet filter {\n chain input {\n  type filter hook input priority filter;\n }\n}\n"}}
+      na: {os: "rocky:9.4", cmds: {"systemctl is-active nftables.service": active}, files: {/etc/nftables.conf: "table inet filter {}\n"}}
+
+  - id: firewall:iptables-input-open
+    title: iptables service is active but INPUT accepts everything
+    description: The iptables (or netfilter-persistent) service is running, yet the INPUT chain has an ACCEPT policy and no DROP/REJECT rule, so every listening port is reachable.
+    severity: high
+    applies_if:
+      unit_active: [iptables, netfilter-persistent]
+      not: {unit_active: [firewalld, ufw]}
+    probe: {type: command, cmd: [iptables, -S]}
+    expect: ['output regex (?m)^-P INPUT (DROP|REJECT) || output regex (?m)^-A INPUT .*-j (DROP|REJECT)']
+    remediation: Add a final REJECT/DROP rule (or a DROP policy) to INPUT after allowing established traffic, loopback and required services, then save the rules.
+    fix: "iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; iptables -A INPUT -i lo -j ACCEPT; iptables -A INPUT -p tcp --dport 22 -j ACCEPT; iptables -P INPUT DROP; then save (service iptables save / netfilter-persistent save)"
+    references: [https://www.netfilter.org/documentation/]
+    tests:
+      pass: {cmds: {"systemctl is-active iptables.service": active, "iptables -S": "-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -j REJECT --reject-with icmp-host-prohibited\n"}}
+      fail: {cmds: {"systemctl is-active netfilter-persistent.service": active, "iptables -S": "-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT\n"}}
+      na: {cmds: {"iptables -S": "-P INPUT ACCEPT\n"}}
+
+  - id: firewall:ip6tables-input-open
+    title: IPv6 INPUT is unfiltered while an iptables service runs
+    description: IPv6 is enabled and an iptables-based service manages rules, but ip6tables INPUT accepts everything, so services are reachable over IPv6 even if IPv4 is filtered.
+    severity: medium
+    applies_if:
+      unit_active: [ip6tables, netfilter-persistent]
+      file: /proc/net/if_inet6
+      not: {unit_active: [firewalld, ufw]}
+    probe: {type: command, cmd: [ip6tables, -S]}
+    expect: ['output regex (?m)^-P INPUT (DROP|REJECT) || output regex (?m)^-A INPUT .*-j (DROP|REJECT)']
+    remediation: Mirror the IPv4 policy in ip6tables (allow established, loopback, ICMPv6 and required services; drop the rest) or disable IPv6 if unused.
+    fix: "ip6tables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; ip6tables -A INPUT -i lo -j ACCEPT; ip6tables -A INPUT -p ipv6-icmp -j ACCEPT; ip6tables -P INPUT DROP; then save"
+    references: [https://www.netfilter.org/documentation/]
+    tests:
+      pass: {files: {/proc/net/if_inet6: "x\n"}, cmds: {"systemctl is-active ip6tables.service": active, "ip6tables -S": "-P INPUT DROP\n"}}
+      fail: {files: {/proc/net/if_inet6: "x\n"}, cmds: {"systemctl is-active ip6tables.service": active, "ip6tables -S": "-P INPUT ACCEPT\n-P FORWARD ACCEPT\n"}}
+      na: {cmds: {"systemctl is-active ip6tables.service": active, "ip6tables -S": "-P INPUT ACCEPT\n"}}
+
+  - id: firewall:ufw-default-incoming-allow
+    title: ufw is active with a default incoming policy of allow
+    description: With "Default allow (incoming)" ufw only blocks what you explicitly deny, so every new service is exposed.
+    severity: high
+    applies_if: {package: ufw}
+    probe: {type: command, cmd: [ufw, status, verbose]}
+    where: ['output regex Status: active']
+    expect: ['output regex Default: (deny|reject) \(incoming\)']
+    remediation: Deny incoming by default and allow only the services you need.
+    fix: ufw allow OpenSSH && ufw default deny incoming
+    references: [https://manpages.ubuntu.com/manpages/noble/en/man8/ufw.8.html]
+    tests:
+      pass: {packages: {ufw: 0.36.2-1}, cmds: {"ufw status verbose": "Status: active\nLogging: on (low)\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n"}}
+      fail: {packages: {ufw: 0.36.2-1}, cmds: {"ufw status verbose": "Status: active\nLogging: on (low)\nDefault: allow (incoming), allow (outgoing), disabled (routed)\n"}}
+      na: {cmds: {"ufw status verbose": "Status: active\nDefault: allow (incoming)\n"}}
+
+  - id: firewall:ufw-ipv6-disabled
+    title: ufw does not manage IPv6 while IPv6 is enabled
+    description: IPV6=no in /etc/default/ufw makes ufw leave ip6tables alone, so services are reachable over IPv6 without any filtering.
+    severity: medium
+    applies_if: {package: ufw, file: /proc/net/if_inet6}
+    probe: {type: config, format: env, path: /etc/default/ufw, key: IPV6, default: "yes"}
+    expect: [value eq yes]
+    remediation: Set IPV6=yes in /etc/default/ufw and reload ufw (or disable IPv6 if it is not used).
+    fix: sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw && ufw reload
+    references: [https://manpages.ubuntu.com/manpages/noble/en/man8/ufw-framework.8.html]
+    tests:
+      pass: {packages: {ufw: 0.36.2-1}, files: {/proc/net/if_inet6: "x\n", /etc/default/ufw: "IPV6=yes\nDEFAULT_INPUT_POLICY=\"DROP\"\n"}}
+      fail: {packages: {ufw: 0.36.2-1}, files: {/proc/net/if_inet6: "x\n", /etc/default/ufw: "IPV6=no\n"}}
+      na: {packages: {ufw: 0.36.2-1}, files: {/etc/default/ufw: "IPV6=no\n"}}
+
+  - id: firewall:ufw-default-forward-accept
+    title: ufw forwards routed traffic by default
+    description: DEFAULT_FORWARD_POLICY="ACCEPT" lets the host route traffic between interfaces without filtering (relevant on hosts with containers, VPNs or several NICs).
+    severity: low
+    applies_if: {package: ufw}
+    probe: {type: config, format: env, path: /etc/default/ufw, key: DEFAULT_FORWARD_POLICY, default: DROP}
+    expect: ['value in DROP,REJECT']
+    remediation: Set DEFAULT_FORWARD_POLICY="DROP" and add explicit ufw route rules for the forwarding you need.
+    fix: sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw && ufw reload
+    references: [https://manpages.ubuntu.com/manpages/noble/en/man8/ufw.8.html]
+    tests:
+      pass: {packages: {ufw: 0.36.2-1}, files: {/etc/default/ufw: "DEFAULT_FORWARD_POLICY=\"DROP\"\n"}}
+      fail: {packages: {ufw: 0.36.2-1}, files: {/etc/default/ufw: "DEFAULT_FORWARD_POLICY=\"ACCEPT\"\n"}}
+
+  - id: firewall:ufw-logging-off
+    title: ufw logging is off
+    description: LOGLEVEL=off means blocked connections leave no trace in the logs.
+    severity: low
+    level: strict
+    applies_if: {package: ufw}
+    probe: {type: config, format: env, path: /etc/ufw/ufw.conf, key: LOGLEVEL, default: low}
+    expect: [value ne off]
+    remediation: Turn ufw logging on (low is enough for most servers).
+    fix: ufw logging low
+    references: [https://manpages.ubuntu.com/manpages/noble/en/man8/ufw.8.html]
+    tests:
+      pass: {packages: {ufw: 0.36.2-1}, files: {/etc/ufw/ufw.conf: "ENABLED=yes\nLOGLEVEL=low\n"}}
+      fail: {packages: {ufw: 0.36.2-1}, files: {/etc/ufw/ufw.conf: "ENABLED=yes\nLOGLEVEL=off\n"}}

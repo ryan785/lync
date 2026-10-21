@@ -1,0 +1,193 @@
+pack: fileshare
+title: File sharing (Samba, NFS)
+description: Anonymous and guest-writable SMB shares, SMB1/NTLMv1/LM authentication, and NFS exports that trust remote root or the whole network.
+category: network
+references:
+  - https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html
+  - https://man7.org/linux/man-pages/man5/exports.5.html
+checks:
+  # ---- Samba ----------------------------------------------------------------------
+  - id: samba:guest-writable-share
+    title: Samba share is writable by guests
+    description: A share with guest ok/public = yes that is also writable lets anyone on the network upload or overwrite files without a password (malware drops, ransomware, web shells if the share overlaps a web root).
+    severity: high
+    level: basic
+    applies_if: {package: [samba, samba-common, samba-common-bin]}
+    probe: {type: content, path: [/etc/samba/smb.conf, /etc/samba/smb.conf.d/*.conf], regex: '(?is)^\[[^\]\n]+\][^\[]*?^[ \t]*(?:(?:guest ok|public)[ \t]*=[ \t]*yes[^\[]*?^[ \t]*(?:writ(?:e)?able[ \t]*=[ \t]*yes|write ok[ \t]*=[ \t]*yes|read only[ \t]*=[ \t]*no)|(?:writ(?:e)?able[ \t]*=[ \t]*yes|write ok[ \t]*=[ \t]*yes|read only[ \t]*=[ \t]*no)[^\[]*?^[ \t]*(?:guest ok|public)[ \t]*=[ \t]*yes)'}
+    expect: [match eq false]
+    remediation: Require authentication on writable shares (guest ok = no) or make guest shares read-only.
+    fix: "in the share section set 'guest ok = no' (or 'read only = yes'), then testparm -s && smbcontrol all reload-config"
+    references: [https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html#GUESTOK]
+    tests:
+      pass: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  workgroup = X\n[public]\n  path = /srv/pub\n  guest ok = yes\n  read only = yes\n[team]\n  path = /srv/team\n  writable = yes\n  valid users = @team\n"}}
+      fail:
+        - {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  workgroup = X\n[drop]\n  path = /srv/drop\n  guest ok = yes\n  writable = yes\n"}}
+        - {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[drop]\n  read only = no\n  public = yes\n"}}
+      na: {files: {/etc/samba/smb.conf: "[drop]\n  guest ok = yes\n  writable = yes\n"}}
+
+  - id: samba:guest-share
+    title: Samba share allows guest access
+    description: A share with guest ok/public = yes can be read by anyone who can reach port 445, without credentials.
+    severity: medium
+    applies_if: {package: [samba, samba-common, samba-common-bin]}
+    probe: {type: content, path: [/etc/samba/smb.conf, /etc/samba/smb.conf.d/*.conf], regex: '(?i)^[ \t]*(guest ok|public)[ \t]*=[ \t]*yes'}
+    expect: [match eq false]
+    remediation: Confirm the share is meant to be public; otherwise require authentication.
+    fix: "set 'guest ok = no' in the share, then smbcontrol all reload-config"
+    references: [https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html#GUESTOK]
+    tests:
+      pass: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[team]\n  valid users = @team\n  ; guest ok = yes\n"}}
+      fail: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[pub]\n  guest ok = yes\n"}}
+
+  - id: samba:smb1-enabled
+    title: Samba accepts SMB1 (NT1)
+    description: server min protocol allows NT1/LANMAN, the protocol family behind EternalBlue/WannaCry-class bugs and downgrade attacks. Samba 4.11+ defaults to SMB2_02; older releases default to NT1.
+    severity: high
+    tags: [cis]
+    applies_if: {package: [samba, samba-common, samba-common-bin]}
+    probe:
+      type: config
+      format: ini
+      path: [/etc/samba/smb.conf]
+      section: global
+      key: server min protocol
+      default: SMB2_02
+      defaults:
+        - {os: rhel, version_lt: "8", value: NT1}
+        - {os: ubuntu, version_lt: "20.04", value: NT1}
+        - {os: debian, version_lt: "11", value: NT1}
+    expect: ['value not_in nt1,lanman1,lanman2,core,coreplus']
+    remediation: Require SMB2 or newer.
+    fix: "set 'server min protocol = SMB2_10' in [global], then smbcontrol all reload-config"
+    references: [https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html#SERVERMINPROTOCOL, https://msrc.microsoft.com/blog/2017/06/stop-using-smb1/]
+    tests:
+      pass: {os: "rocky:9.4", packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  workgroup = X\n"}}
+      fail:
+        - {os: "rocky:9.4", packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  server min protocol = NT1\n"}}
+        - {os: "centos:7", packages: {samba: 4.10.16-25.el7}, files: {/etc/samba/smb.conf: "[global]\n  workgroup = X\n"}}
+
+  - id: samba:ntlmv1
+    title: Samba accepts NTLMv1 authentication
+    description: ntlm auth = yes / ntlmv1-permitted accepts NTLMv1 responses, which can be cracked or relayed easily.
+    severity: medium
+    applies_if: {package: [samba, samba-common, samba-common-bin]}
+    probe: {type: config, format: ini, path: [/etc/samba/smb.conf], section: global, key: ntlm auth, default: ntlmv2-only}
+    expect: ['value not_in yes,ntlmv1-permitted']
+    remediation: Accept only NTLMv2 (or Kerberos).
+    fix: "set 'ntlm auth = ntlmv2-only' in [global], then smbcontrol all reload-config"
+    references: [https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html#NTLMAUTH]
+    tests:
+      pass: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  workgroup = X\n"}}
+      fail: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  ntlm auth = yes\n"}}
+
+  - id: samba:lanman-auth
+    title: Samba accepts LANMAN authentication
+    description: lanman auth = yes accepts LM hashes, which are trivially cracked.
+    severity: high
+    applies_if: {package: [samba, samba-common, samba-common-bin]}
+    probe: {type: config, format: ini, path: [/etc/samba/smb.conf], section: global, key: lanman auth, default: "no"}
+    expect: [value in no]
+    remediation: Disable LANMAN authentication.
+    fix: "set 'lanman auth = no' in [global], then smbcontrol all reload-config"
+    references: [https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html#LANMANAUTH]
+    tests:
+      pass: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  lanman auth = no\n"}}
+      fail: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  lanman auth = yes\n"}}
+
+  - id: samba:map-to-guest
+    title: Samba maps failed logins to the guest account
+    description: map to guest = bad user (or bad password) silently turns unknown users (or wrong passwords) into guest sessions, so any guest-accessible share is reachable with arbitrary credentials.
+    severity: low
+    applies_if: {package: [samba, samba-common, samba-common-bin]}
+    probe: {type: config, format: ini, path: [/etc/samba/smb.conf], section: global, key: map to guest, default: never}
+    expect: ['value not_in bad user,bad password,bad uid']
+    remediation: Use map to guest = never unless you deliberately run guest shares.
+    fix: "set 'map to guest = never' in [global], then smbcontrol all reload-config"
+    references: [https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html#MAPTOGUEST]
+    tests:
+      pass: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  workgroup = X\n"}}
+      fail: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  map to guest = bad user\n"}}
+
+  - id: samba:signing-not-mandatory
+    title: Samba does not require SMB signing
+    description: Without mandatory signing, SMB sessions can be tampered with or relayed (NTLM relay) by a machine-in-the-middle.
+    severity: low
+    level: strict
+    applies_if: {package: [samba, samba-common, samba-common-bin]}
+    probe: {type: config, format: ini, path: [/etc/samba/smb.conf], section: global, key: server signing, default: default}
+    expect: ['value in mandatory,required']
+    remediation: Require signing (or SMB3 encryption) for all clients that support it.
+    fix: "set 'server signing = mandatory' in [global], then smbcontrol all reload-config"
+    references: [https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html#SERVERSIGNING]
+    tests:
+      pass: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  server signing = mandatory\n"}}
+      fail: {packages: {samba: 4.19.4-1.el9}, files: {/etc/samba/smb.conf: "[global]\n  workgroup = X\n"}}
+
+  # ---- NFS ----------------------------------------------------------------------------
+  - id: nfs:no-root-squash
+    title: NFS export trusts remote root (no_root_squash)
+    description: With no_root_squash, root on any allowed client is root on the exported files, so one compromised client can plant setuid binaries or overwrite system files on the server.
+    severity: high
+    level: basic
+    tags: [cis]
+    applies_if: {package: [nfs-utils, nfs-kernel-server]}
+    probe: {type: exports}
+    where: ['options has_any no_root_squash']
+    expect_none: true
+    remediation: Remove no_root_squash (root_squash is the default) unless the client is fully trusted, e.g. a diskless boot host.
+    fix: edit /etc/exports to drop no_root_squash for {path}, then exportfs -ra
+    references: [https://man7.org/linux/man-pages/man5/exports.5.html]
+    tests:
+      pass: {packages: {nfs-utils: 2.5.4-25.el9}, files: {/etc/exports: "/srv/data 10.0.0.0/24(rw,sync,root_squash)\n"}}
+      fail: {packages: {nfs-utils: 2.5.4-25.el9}, files: {/etc/exports: "/srv/data 10.0.0.0/24(rw,sync,no_root_squash) 10.0.1.5(ro)\n"}, findings: 1}
+      na: {files: {/etc/exports: "/srv/data *(rw,no_root_squash)\n"}}
+
+  - id: nfs:world-export
+    title: NFS export is open to every host
+    description: The export has no client restriction (* or no host), so anyone who can reach the NFS port can mount it. Read-write world exports are Critical.
+    severity: high
+    level: basic
+    applies_if: {package: [nfs-utils, nfs-kernel-server]}
+    probe: {type: exports}
+    where: [wildcard eq true]
+    expect_none: true
+    severity_if:
+      - {when: 'options has_any rw', severity: critical}
+    remediation: Restrict the export to specific hosts or subnets.
+    fix: edit /etc/exports to replace the * client for {path} with a host or subnet, then exportfs -ra
+    references: [https://man7.org/linux/man-pages/man5/exports.5.html]
+    tests:
+      pass: {packages: {nfs-kernel-server: 1:2.6.2-4}, files: {/etc/exports: "/srv/data 10.0.0.0/24(ro)\n"}}
+      fail:
+        - {packages: {nfs-kernel-server: 1:2.6.2-4}, files: {/etc/exports: "/srv/pub *(ro,sync)\n"}}
+        - {packages: {nfs-kernel-server: 1:2.6.2-4}, files: {/etc/exports.d/x.exports: "/srv/up *(rw,sync)\n"}, severity: critical}
+
+  - id: nfs:insecure-ports
+    title: NFS export accepts requests from unprivileged ports
+    description: The insecure option lets any user on an allowed client (not only root) talk to the NFS server directly with a user-space client and forge credentials.
+    severity: medium
+    applies_if: {package: [nfs-utils, nfs-kernel-server]}
+    probe: {type: exports}
+    where: ['options has_any insecure']
+    expect_none: true
+    remediation: Remove the insecure option unless a specific client (e.g. macOS Finder) needs it.
+    fix: edit /etc/exports to drop insecure for {path}, then exportfs -ra
+    references: [https://man7.org/linux/man-pages/man5/exports.5.html]
+    tests:
+      pass: {packages: {nfs-utils: 2.5.4-25.el9}, files: {/etc/exports: "/srv/data 10.0.0.0/24(rw,secure)\n"}}
+      fail: {packages: {nfs-utils: 2.5.4-25.el9}, files: {/etc/exports: "/srv/data 10.0.0.0/24(rw,insecure)\n"}}
+
+  - id: nfs:anonuid-root
+    title: NFS export maps anonymous users to root
+    description: anonuid=0 (or anongid=0) maps squashed and anonymous requests to root, which reverses the protection of root_squash/all_squash.
+    severity: high
+    applies_if: {package: [nfs-utils, nfs-kernel-server]}
+    probe: {type: exports}
+    where: ['options regex (^|,)anon(uid|gid)=0(,|$)']
+    expect_none: true
+    remediation: Map anonymous users to an unprivileged account (e.g. nobody, 65534).
+    fix: edit /etc/exports to set anonuid=65534,anongid=65534 for {path}, then exportfs -ra
+    references: [https://man7.org/linux/man-pages/man5/exports.5.html]
+    tests:
+      pass: {packages: {nfs-utils: 2.5.4-25.el9}, files: {/etc/exports: "/srv/data 10.0.0.0/24(rw,all_squash,anonuid=65534)\n"}}
+      fail: {packages: {nfs-utils: 2.5.4-25.el9}, files: {/etc/exports: "/srv/data 10.0.0.0/24(rw,all_squash,anonuid=0,anongid=0)\n"}}

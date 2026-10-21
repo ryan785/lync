@@ -1,0 +1,214 @@
+pack: dns
+title: DNS servers (BIND, Unbound, dnsmasq)
+description: Open recursion (DNS amplification), zone transfers to anyone, version disclosure, key file permissions and privilege of the DNS daemons.
+category: network
+references:
+  - https://bind9.readthedocs.io/en/latest/reference.html
+  - https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html
+checks:
+  # ---- BIND -------------------------------------------------------------------
+  - id: bind:open-recursion
+    title: BIND allows recursion for any client
+    description: allow-recursion or allow-query-cache contains "any", so the server is an open resolver that can be abused for DNS amplification DDoS and cache poisoning. Also beware that without allow-recursion, an options-level "allow-query { any; }" is inherited by recursion.
+    severity: high
+    level: basic
+    applies_if: {package: [bind, bind9]}
+    probe: {type: content, combine: true, path: [/etc/named.conf, /etc/named/*.conf, /etc/bind/named.conf, /etc/bind/named.conf.options, /etc/bind/named.conf.local], regex: 'allow-(recursion|query-cache)\s*\{[^}]*\bany\s*;'}
+    expect: [match eq false]
+    remediation: Limit recursion to your own networks with an ACL, or set "recursion no;" on an authoritative-only server.
+    fix: "acl trusted { 127.0.0.1; ::1; 10.0.0.0/8; }; options { allow-recursion { trusted; }; allow-query-cache { trusted; }; };  then named-checkconf && rndc reconfig"
+    references: [https://kb.isc.org/docs/aa-00269, https://www.cisa.gov/news-events/alerts/2013/03/29/dns-amplification-attacks]
+    tests:
+      pass: {packages: {bind: 9.16.23-14.el9}, files: {/etc/named.conf: "options {\n  recursion yes;\n  allow-recursion { localhost; 10.0.0.0/8; };\n};\n"}}
+      fail: {packages: {bind9: 1:9.18.24-1}, files: {/etc/bind/named.conf.options: "options {\n  allow-recursion {\n    any;\n  };\n};\n"}}
+      na: {files: {/etc/named.conf: "options { allow-recursion { any; }; };\n"}}
+
+  - id: bind:allow-transfer-any
+    title: BIND allows zone transfers to any host
+    description: allow-transfer { any; } lets anyone download complete zones (AXFR), disclosing every host name and internal address in them.
+    severity: medium
+    applies_if: {package: [bind, bind9]}
+    probe: {type: content, combine: true, path: [/etc/named.conf, /etc/named/*.conf, /etc/bind/named.conf, /etc/bind/named.conf.options, /etc/bind/named.conf.local], regex: 'allow-transfer\s*\{[^}]*\bany\s*;'}
+    expect: [match eq false]
+    remediation: Allow transfers only to your secondary servers (by address or TSIG key), or none.
+    fix: "options { allow-transfer { none; }; };  and per zone: allow-transfer { key xfer-key; };"
+    references: [https://bind9.readthedocs.io/en/latest/reference.html#namedconf-statement-allow-transfer]
+    tests:
+      pass: {packages: {bind: 9.16.23-14.el9}, files: {/etc/named.conf: "options { allow-transfer { none; }; };\n"}}
+      fail: {packages: {bind: 9.16.23-14.el9}, files: {/etc/named.conf: "zone \"example.com\" { type primary; allow-transfer { any; }; };\n"}}
+
+  - id: bind:version-disclosed
+    title: BIND discloses its version (no version override)
+    description: Without a "version" statement BIND answers CHAOS TXT version.bind queries with the exact release, which lets attackers pick matching exploits.
+    severity: low
+    applies_if: {package: [bind, bind9]}
+    probe: {type: content, combine: true, path: [/etc/named.conf, /etc/named/*.conf, /etc/bind/named.conf, /etc/bind/named.conf.options], regex: '^\s*version\s+("[^"]*"|none)\s*;'}
+    expect: [match eq true]
+    remediation: Hide the version in the options block.
+    fix: 'options { version "not disclosed"; };  then rndc reconfig'
+    references: [https://bind9.readthedocs.io/en/latest/reference.html#namedconf-statement-version]
+    tests:
+      pass: {packages: {bind9: 1:9.18.24-1}, files: {/etc/bind/named.conf.options: "options {\n  version \"none\";\n};\n"}}
+      fail: {packages: {bind9: 1:9.18.24-1}, files: {/etc/bind/named.conf.options: "options {\n  directory \"/var/cache/bind\";\n};\n"}}
+
+  - id: bind:dnssec-validation-off
+    title: BIND DNSSEC validation is disabled
+    description: dnssec-validation no makes the resolver accept forged answers for signed zones.
+    severity: medium
+    applies_if: {package: [bind, bind9]}
+    probe: {type: content, combine: true, path: [/etc/named.conf, /etc/named/*.conf, /etc/bind/named.conf, /etc/bind/named.conf.options], regex: '^\s*dnssec-validation\s+no\s*;'}
+    expect: [match eq false]
+    remediation: Enable DNSSEC validation with the built-in trust anchor.
+    fix: "options { dnssec-validation auto; };  then rndc reconfig"
+    references: [https://bind9.readthedocs.io/en/latest/dnssec-guide.html]
+    tests:
+      pass: {packages: {bind9: 1:9.18.24-1}, files: {/etc/bind/named.conf.options: "options {\n  dnssec-validation auto;\n};\n"}}
+      fail: {packages: {bind9: 1:9.18.24-1}, files: {/etc/bind/named.conf.options: "options {\n  dnssec-validation no;\n};\n"}}
+
+  - id: bind:no-rate-limit
+    title: BIND has no response rate limiting
+    description: Without rate-limit (RRL), an authoritative server answering the internet can be used to amplify spoofed-source floods.
+    severity: low
+    level: strict
+    applies_if: {package: [bind, bind9]}
+    probe: {type: content, combine: true, path: [/etc/named.conf, /etc/named/*.conf, /etc/bind/named.conf, /etc/bind/named.conf.options], regex: '^\s*rate-limit\s*\{'}
+    expect: [match eq true]
+    remediation: Enable response rate limiting in the options block.
+    fix: "options { rate-limit { responses-per-second 10; }; };"
+    references: [https://kb.isc.org/docs/aa-00994]
+    tests:
+      pass: {packages: {bind: 9.16.23-14.el9}, files: {/etc/named.conf: "options {\n  rate-limit {\n    responses-per-second 10;\n  };\n};\n"}}
+      fail: {packages: {bind: 9.16.23-14.el9}, files: {/etc/named.conf: "options {\n  recursion no;\n};\n"}}
+
+  - id: bind:rndc-key-perms
+    title: BIND rndc key is readable by other users
+    description: The rndc key authenticates control commands (reload, freeze, stop) to named; anyone who can read it can control the DNS server.
+    severity: high
+    applies_if: {package: [bind, bind9]}
+    probe: {type: file, path: [/etc/rndc.key, /etc/bind/rndc.key, /etc/named/rndc.key]}
+    expect: [mode perm_max 0640]
+    remediation: Restrict the key to root and the named group.
+    fix: chmod 0640 {path} && chown root:named {path}
+    references: [https://bind9.readthedocs.io/en/latest/manpages.html#rndc-confgen-rndc-key-generation-tool]
+    tests:
+      pass: {packages: {bind: 9.16.23-14.el9}, files: {/etc/rndc.key: "key"}, meta: {/etc/rndc.key: "0640 0 25"}}
+      fail: {packages: {bind9: 1:9.18.24-1}, files: {/etc/bind/rndc.key: "key"}, meta: {/etc/bind/rndc.key: "0644 0 0"}}
+
+  - id: bind:named-conf-writable
+    title: BIND configuration is writable by other users
+    description: A group- or world-writable named.conf lets local users redirect zones or add forwarders.
+    severity: high
+    applies_if: {package: [bind, bind9]}
+    probe: {type: file, path: [/etc/named.conf, /etc/bind/named.conf, /etc/bind/named.conf.options, /etc/bind/named.conf.local]}
+    expect: [mode bits_none 0022]
+    remediation: Remove group/other write permission.
+    fix: chmod go-w {path}
+    references: [https://bind9.readthedocs.io/en/latest/reference.html]
+    tests:
+      pass: {packages: {bind: 9.16.23-14.el9}, files: {/etc/named.conf: "x"}, meta: {/etc/named.conf: "0640 0 25"}}
+      fail: {packages: {bind: 9.16.23-14.el9}, files: {/etc/named.conf: "x"}, meta: {/etc/named.conf: "0666 0 25"}}
+
+  - id: bind:named-as-root
+    title: named runs as root
+    description: named normally drops to the named/bind user (-u). Running as root turns any remote code execution bug into full host compromise.
+    severity: high
+    applies_if: {process: named}
+    probe: {type: process, name: named}
+    expect: [uid ne 0]
+    remediation: Start named with -u named (RHEL) / -u bind (Debian); check OPTIONS in /etc/sysconfig/named or /etc/default/named and the unit file.
+    fix: systemctl cat named; ensure ExecStart passes -u named, then systemctl restart named
+    references: [https://bind9.readthedocs.io/en/latest/manpages.html#named-internet-domain-name-server]
+    tests:
+      pass: {files: {/proc/412/comm: "named\n", /proc/412/status: "Name:\tnamed\nUid:\t25\t25\t25\t25\n"}}
+      fail: {files: {/proc/412/comm: "named\n", /proc/412/status: "Name:\tnamed\nUid:\t0\t0\t0\t0\n"}}
+      na: {files: {/proc/1/comm: "systemd\n"}}
+
+  # ---- Unbound ------------------------------------------------------------------
+  - id: unbound:open-resolver
+    title: Unbound allows recursion from any address
+    description: access-control 0.0.0.0/0 or ::/0 allow makes Unbound an open resolver usable for amplification attacks.
+    severity: high
+    level: basic
+    applies_if: {package: unbound}
+    probe: {type: content, combine: true, path: [/etc/unbound/unbound.conf, /etc/unbound/unbound.conf.d/*.conf, /etc/unbound/conf.d/*.conf, /etc/unbound/local.d/*.conf], regex: '^\s*access-control:\s*(0\.0\.0\.0/0|::0?/0)\s+allow'}
+    expect: [match eq false]
+    remediation: Allow only your own networks; Unbound refuses everything else by default.
+    fix: "server:\n  access-control: 10.0.0.0/8 allow   (remove the 0.0.0.0/0 / ::/0 allow lines), then unbound-checkconf && systemctl reload unbound"
+    references: [https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html#unbound-conf-access-control]
+    tests:
+      pass: {packages: {unbound: 1.17.1-2}, files: {/etc/unbound/unbound.conf: "server:\n  interface: 0.0.0.0\n  access-control: 10.0.0.0/8 allow\n"}}
+      fail: {packages: {unbound: 1.17.1-2}, files: {/etc/unbound/unbound.conf.d/open.conf: "server:\n  access-control: 0.0.0.0/0 allow\n"}}
+
+  - id: unbound:version-disclosed
+    title: Unbound answers version queries
+    description: hide-version defaults to no, so version.bind/version.server reveal the exact Unbound release.
+    severity: low
+    applies_if: {package: unbound}
+    probe: {type: content, combine: true, path: [/etc/unbound/unbound.conf, /etc/unbound/unbound.conf.d/*.conf, /etc/unbound/conf.d/*.conf], regex: '^\s*hide-version:\s*yes'}
+    expect: [match eq true]
+    remediation: Set hide-version (and hide-identity) in the server section.
+    fix: "server:\n  hide-version: yes\n  hide-identity: yes"
+    references: [https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html#unbound-conf-hide-version]
+    tests:
+      pass: {packages: {unbound: 1.17.1-2}, files: {/etc/unbound/unbound.conf: "server:\n  hide-version: yes\n"}}
+      fail: {packages: {unbound: 1.17.1-2}, files: {/etc/unbound/unbound.conf: "server:\n  verbosity: 1\n"}}
+
+  - id: unbound:identity-disclosed
+    title: Unbound answers identity queries
+    description: hide-identity defaults to no, so id.server/hostname.bind reveal the server host name.
+    severity: low
+    level: strict
+    applies_if: {package: unbound}
+    probe: {type: content, combine: true, path: [/etc/unbound/unbound.conf, /etc/unbound/unbound.conf.d/*.conf, /etc/unbound/conf.d/*.conf], regex: '^\s*hide-identity:\s*yes'}
+    expect: [match eq true]
+    remediation: Set hide-identity in the server section.
+    fix: "server:\n  hide-identity: yes"
+    references: [https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html#unbound-conf-hide-identity]
+    tests:
+      pass: {packages: {unbound: 1.17.1-2}, files: {/etc/unbound/unbound.conf: "server:\n  hide-identity: yes\n"}}
+      fail: {packages: {unbound: 1.17.1-2}, files: {/etc/unbound/unbound.conf: "server:\n  verbosity: 1\n"}}
+
+  - id: unbound:remote-control-public
+    title: Unbound remote control listens on all interfaces
+    description: unbound-control can flush caches, add local data and stop the server; exposing it on all addresses relies solely on the control certificates.
+    severity: medium
+    applies_if: {package: unbound}
+    probe: {type: content, combine: true, path: [/etc/unbound/unbound.conf, /etc/unbound/unbound.conf.d/*.conf, /etc/unbound/conf.d/*.conf], regex: '^\s*control-interface:\s*"?(0\.0\.0\.0|::)"?\s*$'}
+    expect: [match eq false]
+    remediation: Bind remote control to localhost or a Unix socket.
+    fix: "remote-control:\n  control-interface: /run/unbound.ctl"
+    references: [https://unbound.docs.nlnetlabs.nl/en/latest/manpages/unbound.conf.html#unbound-conf-remote-control]
+    tests:
+      pass: {packages: {unbound: 1.17.1-2}, files: {/etc/unbound/unbound.conf: "remote-control:\n  control-enable: yes\n  control-interface: 127.0.0.1\n"}}
+      fail: {packages: {unbound: 1.17.1-2}, files: {/etc/unbound/unbound.conf: "remote-control:\n  control-enable: yes\n  control-interface: 0.0.0.0\n"}}
+
+  # ---- dnsmasq ------------------------------------------------------------------
+  - id: dnsmasq:unrestricted-listener
+    title: dnsmasq answers DNS on every interface without restriction
+    description: dnsmasq listens on port 53 but its configuration has no interface, listen-address, bind-interfaces or local-service setting, so it can answer queries from any network the host is attached to (open resolver).
+    severity: medium
+    applies_if: {package: dnsmasq, listening: 53}
+    probe: {type: content, combine: true, path: [/etc/dnsmasq.conf, /etc/dnsmasq.d/*.conf], regex: '^\s*(interface|listen-address|local-service|bind-interfaces|bind-dynamic|except-interface)\b'}
+    expect: [match eq true]
+    remediation: Restrict dnsmasq to the interfaces it serves (or to local subnets with local-service).
+    fix: "echo -e 'interface=eth1\\nbind-interfaces' > /etc/dnsmasq.d/10-listen.conf && systemctl restart dnsmasq"
+    references: [https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html]
+    tests:
+      pass: {packages: {dnsmasq: 2.89-1}, cmds: {"ss -H -tulnp": "udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:* users:((\"dnsmasq\",pid=7,fd=4))"}, files: {/etc/dnsmasq.conf: "domain-needed\nlocal-service\n"}}
+      fail: {packages: {dnsmasq: 2.89-1}, cmds: {"ss -H -tulnp": "udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:* users:((\"dnsmasq\",pid=7,fd=4))"}, files: {/etc/dnsmasq.conf: "domain-needed\nbogus-priv\n"}}
+      na: {packages: {dnsmasq: 2.89-1}, files: {/etc/dnsmasq.conf: "domain-needed\n"}}
+
+  - id: dnsmasq:no-domain-needed
+    title: dnsmasq forwards plain names and private reverse lookups upstream
+    description: Without domain-needed and bogus-priv dnsmasq leaks internal single-label names and RFC1918 reverse lookups to upstream resolvers.
+    severity: low
+    level: strict
+    applies_if: {package: dnsmasq}
+    probe: {type: content, combine: true, path: [/etc/dnsmasq.conf, /etc/dnsmasq.d/*.conf], regex: '^\s*domain-needed\b'}
+    expect: [match eq true]
+    remediation: Add domain-needed and bogus-priv to the dnsmasq configuration.
+    fix: "printf 'domain-needed\\nbogus-priv\\n' >> /etc/dnsmasq.d/10-privacy.conf && systemctl restart dnsmasq"
+    references: [https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html]
+    tests:
+      pass: {packages: {dnsmasq: 2.89-1}, files: {/etc/dnsmasq.conf: "domain-needed\nbogus-priv\n"}}
+      fail: {packages: {dnsmasq: 2.89-1}, files: {/etc/dnsmasq.conf: "cache-size=1000\n"}}

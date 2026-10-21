@@ -1,0 +1,124 @@
+pack: mac
+title: Mandatory access control (SELinux, AppArmor)
+description: Persistent SELinux/AppArmor configuration, profiles that are loaded but not enforcing, and risky SELinux booleans. Runtime enforcing state is covered by the Go checks mac:selinux-* / mac:apparmor-*.
+category: config
+references:
+  - https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/using_selinux/index
+  - https://gitlab.com/apparmor/apparmor/-/wikis/Documentation
+checks:
+  - id: mac:selinux-config-not-enforcing
+    title: SELinux is not set to enforcing in /etc/selinux/config
+    description: The boot-time SELinux mode is permissive or disabled, so even if enforcing was switched on at runtime the host comes back unprotected after the next reboot.
+    severity: medium
+    tags: [cis]
+    applies_if: {os: [rhel, fedora], file: /etc/selinux/config}
+    probe: {type: config, format: kv, path: /etc/selinux/config, key: SELINUX}
+    expect: [value eq enforcing]
+    remediation: Set SELINUX=enforcing in /etc/selinux/config. Coming from disabled, touch /.autorelabel and reboot so files get labelled.
+    fix: sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
+    tests:
+      pass: {os: "rocky:9.4", files: {/etc/selinux/config: "SELINUX=enforcing\nSELINUXTYPE=targeted\n"}}
+      fail: [{os: "rocky:9.4", files: {/etc/selinux/config: "SELINUX=permissive\nSELINUXTYPE=targeted\n"}}, {os: "almalinux:8.10", files: {/etc/selinux/config: "SELINUX=disabled\n"}}]
+      na: {os: "debian:12", files: {/etc/selinux/config: "SELINUX=disabled\n"}}
+
+  - id: mac:selinux-policy-not-targeted
+    title: SELinux policy type is not targeted or mls
+    description: SELINUXTYPE=minimum confines only a handful of daemons; most network services run unconfined.
+    severity: low
+    tags: [cis]
+    applies_if: {os: [rhel, fedora], file: /etc/selinux/config}
+    probe: {type: config, format: kv, path: /etc/selinux/config, key: SELINUXTYPE, default: targeted}
+    expect: ['value in targeted,mls']
+    remediation: Use the targeted policy (install selinux-policy-targeted) and relabel.
+    fix: dnf install -y selinux-policy-targeted && sed -i 's/^SELINUXTYPE=.*/SELINUXTYPE=targeted/' /etc/selinux/config && touch /.autorelabel
+    tests:
+      pass: {os: "rocky:9.4", files: {/etc/selinux/config: "SELINUX=enforcing\nSELINUXTYPE=targeted\n"}}
+      fail: {os: "rocky:9.4", files: {/etc/selinux/config: "SELINUX=enforcing\nSELINUXTYPE=minimum\n"}}
+
+  - id: mac:selinux-troubleshoot-tools
+    title: setroubleshoot or mcstrans is installed
+    description: CIS recommends removing setroubleshoot (a D-Bus service that processes denial details) and mcstrans (a translation daemon) from servers; both are extra privileged daemons with no server use.
+    severity: low
+    level: strict
+    tags: [cis]
+    applies_if: {os: [rhel, fedora]}
+    probe: {type: package, name: [setroubleshoot, setroubleshoot-server, mcstrans]}
+    expect_none: true
+    remediation: Remove the packages unless you actively use them.
+    fix: dnf remove -y {name}
+    tests:
+      pass: {os: "rocky:9.4", packages: {bash: 5.1.8-9.el9}}
+      fail: {os: "rocky:9.4", packages: {bash: 5.1.8-9.el9, setroubleshoot-server: 3.3.32-1.el9, mcstrans: 3.6-1.el9}, findings: 2}
+      na: {os: "debian:12", packages: {mcstrans: "3.4-1"}}
+
+  - id: mac:selinux-httpd-unified
+    title: SELinux boolean httpd_unified is on
+    description: httpd_unified lets the web server domain write to all its content types, so a compromised web app can modify its own scripts and static files.
+    severity: medium
+    applies_if: {os: [rhel, fedora], package: [httpd, nginx]}
+    probe: {type: command, cmd: [getsebool, -a], lines: true, line_regex: '^(?P<key>httpd_unified) --> (?P<state>\w+)$'}
+    expect: [state eq off]
+    remediation: Turn the boolean off and label only the writable directories httpd_sys_rw_content_t.
+    fix: setsebool -P httpd_unified off && semanage fcontext -a -t httpd_sys_rw_content_t '/var/www/html/uploads(/.*)?' && restorecon -R /var/www/html/uploads
+    references: [https://man7.org/linux/man-pages/man8/httpd_selinux.8.html]
+    tests:
+      pass: {os: "rocky:9.4", packages: {httpd: 2.4.57-5.el9}, cmds: {"getsebool -a": "httpd_can_network_connect --> on\nhttpd_unified --> off\n"}}
+      fail: {os: "rocky:9.4", packages: {nginx: 1.20.1-14.el9}, cmds: {"getsebool -a": "httpd_unified --> on\n"}}
+      na: {os: "rocky:9.4", cmds: {"getsebool -a": "httpd_unified --> on\n"}}
+      skip: {os: "rocky:9.4", packages: {httpd: 2.4.57-5.el9}}
+
+  - id: mac:selinux-httpd-execmem
+    title: SELinux boolean httpd_execmem is on
+    description: httpd_execmem allows web server processes to map writable memory executable, which removes an exploit mitigation. Only some JIT runtimes need it.
+    severity: low
+    applies_if: {os: [rhel, fedora], package: [httpd, nginx]}
+    probe: {type: command, cmd: [getsebool, -a], lines: true, line_regex: '^(?P<key>httpd_execmem) --> (?P<state>\w+)$'}
+    expect: [state eq off]
+    remediation: Turn the boolean off unless an application documented to need it breaks.
+    fix: setsebool -P httpd_execmem off
+    references: [https://man7.org/linux/man-pages/man8/httpd_selinux.8.html]
+    tests:
+      pass: {os: "rocky:9.4", packages: {httpd: 2.4.57-5.el9}, cmds: {"getsebool -a": "httpd_execmem --> off\n"}}
+      fail: {os: "rocky:9.4", packages: {httpd: 2.4.57-5.el9}, cmds: {"getsebool -a": "httpd_execmem --> on\n"}}
+
+  - id: mac:apparmor-complain-profiles
+    title: AppArmor profiles in complain mode
+    description: Profiles in complain mode only log policy violations; the confined programs are effectively unconfined.
+    severity: low
+    applies_if: {os: [debian, ubuntu, suse], binary: [aa-status]}
+    probe: {type: command, cmd: [aa-status]}
+    expect: ['output not_regex (?m)^\s*[1-9][0-9]* profiles are in complain mode']
+    remediation: Review the complaining profiles (aa-status) and switch them to enforce once they produce no denials.
+    fix: aa-enforce /etc/apparmor.d/<profile>
+    tests:
+      pass: {os: "ubuntu:24.04", files: {/usr/sbin/aa-status: ""}, cmds: {"aa-status": "apparmor module is loaded.\n40 profiles are loaded.\n40 profiles are in enforce mode.\n0 profiles are in complain mode.\n"}}
+      fail: {os: "debian:12", files: {/usr/sbin/aa-status: ""}, cmds: {"aa-status": "apparmor module is loaded.\n12 profiles are loaded.\n9 profiles are in enforce mode.\n3 profiles are in complain mode.\n"}}
+      na: {os: "rocky:9.4", files: {/usr/sbin/aa-status: ""}}
+      skip: {os: "debian:12", files: {/usr/sbin/aa-status: ""}}
+
+  - id: mac:apparmor-unconfined-with-profile
+    title: Processes run unconfined although an AppArmor profile exists
+    description: The process started before its profile was loaded (or the profile was reloaded), so it runs without the confinement you expect until it is restarted.
+    severity: medium
+    applies_if: {os: [debian, ubuntu, suse], binary: [aa-status]}
+    probe: {type: command, cmd: [aa-status]}
+    expect: ['output not_regex (?m)^\s*[1-9][0-9]* processes are unconfined but have a profile defined']
+    remediation: Restart the listed processes (aa-status shows them) so they pick up their profile.
+    fix: aa-status && systemctl restart <service>
+    tests:
+      pass: {os: "ubuntu:24.04", files: {/usr/sbin/aa-status: ""}, cmds: {"aa-status": "0 processes are unconfined but have a profile defined.\n"}}
+      fail: {os: "ubuntu:24.04", files: {/usr/sbin/aa-status: ""}, cmds: {"aa-status": "2 processes are unconfined but have a profile defined.\n   /usr/sbin/cupsd (812)\n"}}
+
+  - id: mac:apparmor-service-disabled
+    title: apparmor.service is not enabled at boot
+    description: Without apparmor.service the profiles are not loaded at boot, so every program starts unconfined.
+    severity: medium
+    applies_if: {os: [debian, ubuntu, suse], unit: apparmor.service}
+    probe: {type: systemd, name: apparmor.service}
+    expect: ['UnitFileState in enabled,static,enabled-runtime,alias,generated']
+    remediation: Enable the AppArmor service so profiles load at boot.
+    fix: systemctl enable --now apparmor
+    tests:
+      pass: {os: "debian:12", files: {/lib/systemd/system/apparmor.service: ""}, cmds: {"systemctl show apparmor.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"}}
+      fail: {os: "debian:12", files: {/lib/systemd/system/apparmor.service: ""}, cmds: {"systemctl show apparmor.service --property=LoadState,ActiveState,UnitFileState": "LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\n"}}
+      na: {os: "rocky:9.4", files: {/lib/systemd/system/apparmor.service: ""}}

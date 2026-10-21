@@ -163,7 +163,7 @@ func (env *evalEnv) setDefault(o obs, k, def string, hasDef bool, loc string) {
 		o[fLoc] = loc + " (" + k + " not set; default " + def + ")"
 		return
 	}
-	o["value"], o["file"] = "", "(unset)"
+	o["value"], o[strings.ToLower(k)], o["file"] = "", "", "(unset)"
 	o[fLoc] = loc + " (" + k + " not set)"
 }
 

@@ -1,0 +1,195 @@
+pack: vpn
+title: VPN configuration (WireGuard, OpenVPN)
+description: Private-key file permissions, weak OpenVPN ciphers and HMACs, compression (VORACLE), shared certificates and missing control-channel protection. Peer liveness is covered by the Go checks wireguard:stale-peer and wireguard:module-missing.
+category: config
+references:
+  - https://www.wireguard.com/quickstart/
+  - https://community.openvpn.net/openvpn/wiki/Openvpn24ManPage
+checks:
+  # ---- WireGuard ----------------------------------------------------------------
+  - id: wireguard:config-perms
+    title: WireGuard config with private key is readable by other users
+    description: /etc/wireguard/*.conf contains the interface PrivateKey (and PresharedKeys); anyone who can read it can impersonate this peer and decrypt its tunnel traffic.
+    severity: high
+    level: basic
+    applies_if: {any: [{package: [wireguard-tools, wireguard]}, {file: /etc/wireguard/*.conf}]}
+    probe: {type: file, path: /etc/wireguard/*.conf}
+    where: [type eq file]
+    expect: [mode perm_max 0600]
+    remediation: Make WireGuard configs root-only and rotate the key if other users could read it.
+    fix: chown root:root {path} && chmod 0600 {path}
+    tests:
+      pass: {files: {/etc/wireguard/wg0.conf: "[Interface]\nPrivateKey = lync-test-secret\n"}, meta: {/etc/wireguard/wg0.conf: "0600 0 0"}}
+      fail: {files: {/etc/wireguard/wg0.conf: "[Interface]\nPrivateKey = lync-test-secret\n"}, meta: {/etc/wireguard/wg0.conf: "0644 0 0"}}
+      na: {files: {/etc/hostname: "x\n"}}
+
+  - id: wireguard:config-owner
+    title: WireGuard config is not owned by root
+    description: A non-root owner can change the config (e.g. PostUp commands that wg-quick runs as root) or read the private key.
+    severity: high
+    applies_if: {any: [{package: [wireguard-tools, wireguard]}, {file: /etc/wireguard/*.conf}]}
+    probe: {type: file, path: /etc/wireguard/*.conf}
+    expect: [uid eq 0]
+    remediation: Give the file to root.
+    fix: chown root:root {path}
+    tests:
+      pass: {files: {/etc/wireguard/wg0.conf: "[Interface]\n"}, meta: {/etc/wireguard/wg0.conf: "0600 0 0"}}
+      fail: {files: {/etc/wireguard/wg0.conf: "[Interface]\n"}, meta: {/etc/wireguard/wg0.conf: "0600 1000 1000"}}
+
+  - id: wireguard:key-file-perms
+    title: WireGuard private key file is readable by other users
+    description: Key files generated with wg genkey (privatekey, *.key) under /etc/wireguard must be readable by root only.
+    severity: high
+    applies_if: {any: [{package: [wireguard-tools, wireguard]}, {file: /etc/wireguard}]}
+    probe: {type: file, path: [/etc/wireguard/*.key, /etc/wireguard/*private*, /etc/wireguard/*.psk]}
+    where: [type eq file]
+    expect: [mode perm_max 0600]
+    remediation: Restrict key files to root (create them under umask 077).
+    fix: chmod 0600 {path} && chown root:root {path}
+    tests:
+      pass: {packages: {wireguard-tools: 1.0.20210914-3}, files: {/etc/wireguard/privatekey: "x"}, meta: {/etc/wireguard/privatekey: "0600 0 0"}}
+      fail: {packages: {wireguard-tools: 1.0.20210914-3}, files: {/etc/wireguard/privatekey: "x", /etc/wireguard/site.psk: "x"}, meta: {/etc/wireguard/privatekey: "0644 0 0", /etc/wireguard/site.psk: "0640 0 0"}, findings: 2}
+
+  - id: wireguard:dir-perms
+    title: /etc/wireguard is accessible to other users
+    description: wg-quick expects /etc/wireguard to be 0700; a traversable directory relies entirely on every file inside being 0600.
+    severity: low
+    level: strict
+    applies_if: {file: /etc/wireguard}
+    probe: {type: file, path: /etc/wireguard}
+    expect: [mode perm_max 0700]
+    remediation: Restrict the directory to root.
+    fix: chmod 0700 /etc/wireguard
+    tests:
+      pass: {meta: {/etc/wireguard: "d0700 0 0"}}
+      fail: {meta: {/etc/wireguard: "d0755 0 0"}}
+
+  # ---- OpenVPN ----------------------------------------------------------------------
+  - id: openvpn:weak-cipher
+    title: OpenVPN uses a weak or no data cipher
+    description: cipher/data-ciphers lists none, BF-CBC, DES, RC2 or CAST, which are broken or vulnerable to SWEET32 (CVE-2016-6329).
+    severity: high
+    applies_if: {package: openvpn}
+    probe: {type: config, format: kv, per_file: true, path: [/etc/openvpn/*.conf, /etc/openvpn/server/*.conf, /etc/openvpn/client/*.conf], keys: [cipher, data-ciphers], default: ""}
+    expect:
+      - 'cipher not_regex (?i)(^|:)(none|bf-[a-z0-9]+|des[a-z0-9-]*|rc2[a-z0-9-]*|cast5?[a-z0-9-]*)($|:)'
+      - 'data-ciphers not_regex (?i)(^|:)(none|bf-[a-z0-9]+|des[a-z0-9-]*|rc2[a-z0-9-]*|cast5?[a-z0-9-]*)($|:)'
+    remediation: Use AEAD ciphers only (OpenVPN 2.5+ negotiates them by default).
+    fix: "set 'data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305' and remove 'cipher BF-CBC' in {key}, then restart the instance"
+    references: [https://sweet32.info/, https://community.openvpn.net/openvpn/wiki/CipherNegotiation]
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "port 1194\ndata-ciphers AES-256-GCM:AES-128-GCM\n"}}
+      fail: [{packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "cipher BF-CBC\n"}}, {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server.conf: "data-ciphers AES-256-GCM:DES-EDE3-CBC\n"}}]
+
+  - id: openvpn:weak-auth
+    title: OpenVPN data channel uses no or MD5 HMAC
+    description: auth none disables packet authentication; auth MD5 uses a broken hash. Only relevant for non-AEAD ciphers.
+    severity: high
+    applies_if: {package: openvpn}
+    probe: {type: config, format: kv, per_file: true, path: [/etc/openvpn/*.conf, /etc/openvpn/server/*.conf, /etc/openvpn/client/*.conf], key: auth}
+    expect: ['value not_regex (?i)^(none|md5|rsa-md5)$']
+    remediation: Use SHA256 or stronger (or AEAD ciphers, which ignore auth).
+    fix: "set 'auth SHA256' in {key} and restart the instance"
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "auth SHA256\n"}}
+      fail: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "auth none\n"}}
+
+  - id: openvpn:compression
+    title: OpenVPN compresses tunnel traffic (VORACLE)
+    description: comp-lzo / compress lz4 before encryption leaks plaintext through ciphertext length (VORACLE); OpenVPN 2.5+ disables it by default. "compress stub" and "comp-lzo no" are safe.
+    severity: medium
+    applies_if: {package: openvpn}
+    probe: {type: content, path: [/etc/openvpn/*.conf, /etc/openvpn/server/*.conf, /etc/openvpn/client/*.conf], regex: '(?i)^\s*(comp-lzo(\s+(yes|adaptive))?|compress(\s+(lzo|lz4|lz4-v2))?)\s*$'}
+    expect: [match eq false]
+    remediation: Remove compression on both server and clients (or use "compress stub-v2" during migration).
+    fix: "delete comp-lzo/compress lines in {path} (allow-compression no on 2.5+), restart"
+    references: [https://community.openvpn.net/openvpn/wiki/VORACLE]
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "comp-lzo no\ncompress stub-v2\n"}}
+      fail: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "comp-lzo\n"}}
+
+  - id: openvpn:no-tls-auth
+    title: OpenVPN server has no tls-auth/tls-crypt
+    description: Without tls-auth or tls-crypt the TLS control channel accepts packets from anyone, exposing the TLS stack to unauthenticated attackers and port scans.
+    severity: low
+    applies_if: {package: openvpn}
+    probe: {type: content, path: [/etc/openvpn/server/*.conf, /etc/openvpn/server.conf], regex: '(?i)^\s*(tls-auth|tls-crypt|tls-crypt-v2)\b|^\s*<tls-(auth|crypt|crypt-v2)>'}
+    expect: [match eq true]
+    remediation: Generate a tls-crypt key and use it on server and clients.
+    fix: openvpn --genkey secret /etc/openvpn/server/tc.key && echo 'tls-crypt tc.key' >> {path}
+    references: [https://community.openvpn.net/openvpn/wiki/Hardening]
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "tls-crypt tc.key\n"}}
+      fail: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "port 1194\n"}}
+
+  - id: openvpn:duplicate-cn
+    title: OpenVPN allows several clients with the same certificate
+    description: duplicate-cn means clients share certificates, so a single leaked key cannot be revoked without cutting off everyone.
+    severity: medium
+    applies_if: {package: openvpn}
+    probe: {type: content, path: [/etc/openvpn/*.conf, /etc/openvpn/server/*.conf], regex: '(?i)^\s*duplicate-cn\b'}
+    expect: [match eq false]
+    remediation: Issue one certificate per client and remove duplicate-cn.
+    fix: remove duplicate-cn from {path} and issue per-client certificates (easyrsa build-client-full <name>)
+    references: [https://community.openvpn.net/openvpn/wiki/Openvpn24ManPage]
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "port 1194\n"}}
+      fail: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "duplicate-cn\n"}}
+
+  - id: openvpn:tls-version-min
+    title: OpenVPN does not require TLS 1.2
+    description: Without tls-version-min 1.2 older OpenVPN releases negotiate TLS 1.0/1.1.
+    severity: low
+    level: strict
+    applies_if: {package: openvpn}
+    probe: {type: content, path: [/etc/openvpn/server/*.conf, /etc/openvpn/server.conf], regex: '(?i)^\s*tls-version-min\s+1\.[23]\b'}
+    expect: [match eq true]
+    remediation: Require TLS 1.2 or newer.
+    fix: echo 'tls-version-min 1.2' >> {path}
+    references: [https://community.openvpn.net/openvpn/wiki/Hardening]
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "tls-version-min 1.2\n"}}
+      fail: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "port 1194\n"}}
+
+  - id: openvpn:key-perms
+    title: OpenVPN private key is readable by other users
+    description: Server/CA private keys and static tls-auth/tls-crypt keys under /etc/openvpn must be readable only by root; with them anyone can impersonate the server or sign client certificates.
+    severity: high
+    applies_if: {package: openvpn}
+    probe: {type: file, path: [/etc/openvpn/*.key, /etc/openvpn/server/*.key, /etc/openvpn/client/*.key, /etc/openvpn/easy-rsa/pki/private/*.key, /etc/openvpn/server/easy-rsa/pki/private/*.key]}
+    where: [type eq file]
+    expect: [mode perm_max 0600]
+    remediation: Restrict keys to root (and rotate them if others could read them).
+    fix: chmod 0600 {path} && chown root:root {path}
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.key: "x"}, meta: {/etc/openvpn/server/server.key: "0600 0 0"}}
+      fail: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.key: "x"}, meta: {/etc/openvpn/server/server.key: "0644 0 0"}}
+
+  - id: openvpn:script-security-3
+    title: OpenVPN passes passwords to scripts (script-security 3)
+    description: script-security 3 allows passwords to be passed to external scripts through environment variables, where other tools and logs may see them.
+    severity: low
+    applies_if: {package: openvpn}
+    probe: {type: content, path: [/etc/openvpn/*.conf, /etc/openvpn/server/*.conf, /etc/openvpn/client/*.conf], regex: '(?i)^\s*script-security\s+3\b'}
+    expect: [match eq false]
+    remediation: Use script-security 2 and auth-user-pass-verify with the "via-file" method.
+    fix: "set 'script-security 2' in {path} and use auth-user-pass-verify <script> via-file"
+    references: [https://community.openvpn.net/openvpn/wiki/Openvpn24ManPage]
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "script-security 2\n"}}
+      fail: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "script-security 3\n"}}
+
+  - id: openvpn:no-privilege-drop
+    title: OpenVPN server keeps root privileges
+    description: Without user/group (e.g. nobody/nogroup) the daemon keeps running as root after start-up, so a bug in OpenVPN or OpenSSL yields root.
+    severity: low
+    level: strict
+    applies_if: {package: openvpn}
+    probe: {type: content, path: [/etc/openvpn/server/*.conf, /etc/openvpn/server.conf], regex: '(?i)^\s*user\s+\S+'}
+    expect: [match eq true]
+    remediation: Drop privileges after start-up (systemd units on some distros already restrict capabilities).
+    fix: "printf 'user nobody\\ngroup nobody\\npersist-key\\npersist-tun\\n' >> {path}"
+    references: [https://community.openvpn.net/openvpn/wiki/Hardening]
+    tests:
+      pass: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "user nobody\ngroup nobody\n"}}
+      fail: {packages: {openvpn: 2.6.3-1}, files: {/etc/openvpn/server/server.conf: "port 1194\n"}}
