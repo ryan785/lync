@@ -84,6 +84,9 @@ func sudoNopasswd(h *Host) []finding.Finding {
 				continue
 			}
 			who := strings.Fields(line)[0]
+			if who == "root" || who == "%root" || who == "#0" {
+				continue // root needs no password to become root
+			}
 			cmds := line[strings.Index(line, "NOPASSWD")+len("NOPASSWD"):]
 			cmds = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(cmds), ":"))
 			sev := finding.SeverityMedium
@@ -175,14 +178,35 @@ var (
 	secretFlagRE = regexp.MustCompile(`(?i)--(token|password|passwd|secret|api-?key|auth-?key)[= ]+["']?([^\s"']+)`)
 )
 
-// secretKeys returns the names of keys that carry a literal value
+var (
+	// Keys that name a secret's setting rather than the secret itself
+	// (/etc/sysconfig/authconfig PASSWDALGORITHM=sha512, *_POLICY, *_FILE...).
+	secretMetaKeyRE = regexp.MustCompile(`(?i)(ALGORITHM|ALGO|_POLICY|POLICY$|_METHOD|_TYPE|_FILE|_PATH|_DIR|_LEN|LENGTH|_MINLEN|_EXPIRY|_EXPIRES|_TTL|_TIMEOUT|_AGE|_DAYS|_ROTATION|_MODE|_FORMAT|_SIZE|_PORT|_HOST|_URL|_USER|_USERNAME|_HEADER|_NAME|_ENABLED?|_REQUIRED|_PROVIDER|_COMMAND|_CMD|_HASH|_SCHEME|_STRENGTH|_COMPLEXITY|_HISTORY|_RETRY|_RETRIES|_ATTEMPTS)$`)
+	// Values that are settings, not secrets.
+	secretNonValueRE = regexp.MustCompile(`(?i)^(yes|no|on|off|true|false|enabled?|disabled?|required|optional|none|null|nil|empty|changeme|md5|des|bigcrypt|blowfish|sha1|sha256|sha512|yescrypt|scrypt|bcrypt|argon2(id|i|d)?|pbkdf2|plain|plaintext|[0-9]{1,5})$`)
+)
+
+// looksSecret reports whether a key=value pair carries an actual secret:
+// a literal value (not a reference, path or setting) of at least 4
+// characters under a key that names the secret itself.
+func looksSecret(k, v string) bool {
+	if len(v) < 4 || strings.HasPrefix(v, "$") || strings.HasPrefix(v, "<") || strings.HasPrefix(v, "/") ||
+		strings.HasPrefix(v, "%") || strings.HasPrefix(v, "{{") {
+		return false
+	}
+	if secretMetaKeyRE.MatchString(strings.TrimPrefix(k, "--")) || secretNonValueRE.MatchString(v) {
+		return false
+	}
+	return true
+}
+
+// secretKeys returns the names of keys that carry a literal secret value
 // (variable references like ${X} or $X are not secrets themselves).
 func secretKeys(src string) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(k, v string) {
-		if v == "" || strings.HasPrefix(v, "$") || strings.HasPrefix(v, "<") || strings.EqualFold(v, "changeme") ||
-			strings.EqualFold(v, "null") || strings.EqualFold(v, "none") || strings.HasPrefix(v, "/run/secrets") {
+		if !looksSecret(k, v) {
 			return
 		}
 		if !seen[k] {
@@ -352,9 +376,15 @@ func cronWritableScripts(h *Host) []finding.Finding {
 	}
 	sort.Strings(paths)
 	for _, p := range paths {
-		m, err := h.Stat(p)
+		// Symlinks (e.g. /usr/sbin/ifup -> /etc/alternatives/ifup) always
+		// show mode 0777; what matters is the file they resolve to.
+		m, target, err := h.StatFollow(p)
 		if err != nil || m.Mode.IsDir() {
 			continue
+		}
+		shown := p
+		if target != p {
+			shown = p + " -> " + target
 		}
 		problem := ""
 		switch {
@@ -363,17 +393,20 @@ func cronWritableScripts(h *Host) []finding.Finding {
 		case m.HasOwner && m.UID != 0 && m.Mode.Perm()&0o200 != 0:
 			problem = fmt.Sprintf("script owned by uid %d (non-root) and owner-writable", m.UID)
 		default:
-			if dm, err := h.Stat(path.Dir(p)); err == nil && dm.Mode.Perm()&0o002 != 0 && dm.Mode&fs.ModeSticky == 0 {
-				problem = "parent directory " + path.Dir(p) + " is world-writable (script can be replaced)"
+			for _, dir := range dedupe([]string{path.Dir(p), path.Dir(target)}) {
+				if dm, err := h.Stat(dir); err == nil && dm.Mode&fs.ModeSymlink == 0 && dm.Mode.Perm()&0o002 != 0 && dm.Mode&fs.ModeSticky == 0 {
+					problem = "parent directory " + dir + " is world-writable (script can be replaced)"
+					break
+				}
 			}
 		}
 		if problem == "" {
 			continue
 		}
 		out = append(out, mkFinding(h, "cron:writable-script", p, finding.CategoryFilesystem, finding.SeverityCritical,
-			"Root cron runs a script others can modify: "+p,
+			"Root cron runs a script others can modify: "+shown,
 			problem+"; referenced by "+cmds[p],
-			fmt.Sprintf("chown root:root %s && chmod 755 %s (and chmod o-w %s)", p, p, path.Dir(p))))
+			fmt.Sprintf("chown root:root %s && chmod 755 %s (and chmod o-w %s)", target, target, path.Dir(target))))
 	}
 	return out
 }

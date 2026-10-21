@@ -32,7 +32,17 @@ func accessFixture(t *testing.T) *fixtureHost {
 		file("/usr/local/bin/backup.sh", "#!/bin/sh").meta("/usr/local/bin/backup.sh", 0o777, 0, 0).
 		file("/var/spool/cron/root", "@reboot /opt/scripts/start.sh\n").
 		file("/opt/scripts/start.sh", "#!/bin/sh").meta("/opt/scripts/start.sh", 0o755, 1000, 1000).
-		file("/etc/cron.daily/logrotate", "#!/bin/sh").meta("/etc/cron.daily/logrotate", 0o755, 0, 0)
+		file("/etc/cron.daily/logrotate", "#!/bin/sh").meta("/etc/cron.daily/logrotate", 0o755, 0, 0).
+		// Field false positives: root NOPASSWD, authconfig settings, symlinked cron command.
+		file("/etc/sudoers.d/root", "root ALL=(ALL) NOPASSWD: ALL\n").
+		file("/etc/sysconfig/authconfig", "PASSWDALGORITHM=sha512\nUSEPWQUALITY=yes\nPASSWORD_POLICY=strict\nFORCELEGACY=no\n").
+		meta("/etc/sysconfig/authconfig", 0o644, 0, 0).
+		file("/etc/cron.d/net", "*/5 * * * * root /usr/sbin/ifup eth0\n15 * * * * root php /var/www/app/artisan schedule:run\n").
+		file("/usr/sbin/ifup", "").meta("/usr/sbin/ifup", fs.ModeSymlink|0o777, 0, 0).
+		file("/etc/alternatives/ifup", "#!/bin/sh").meta("/etc/alternatives/ifup", 0o755, 0, 0).
+		file("/var/www/app/artisan", "<?php // benign").meta("/var/www/app/artisan", 0o755, 991, 991).
+		file("/var/www/app/.env", "APP_KEY=base64:lync-test-secret\nDB_PASSWORD=lync-test-secret\n").meta("/var/www/app/.env", 0o644, 991, 991)
+	fx.h.Links = map[string]string{"/usr/sbin/ifup": "/etc/alternatives/ifup"}
 	return fx
 }
 
@@ -52,6 +62,8 @@ func TestAccessRule(t *testing.T) {
 		"fs:world-writable-dir:/etc/app/drop":                               finding.SeverityHigh,
 		"cron:writable-script:/usr/local/bin/backup.sh":                     finding.SeverityCritical,
 		"cron:writable-script:/opt/scripts/start.sh":                        finding.SeverityCritical,
+		"cron:writable-script:/var/www/app/artisan":                         finding.SeverityCritical,
+		"secrets:world-readable:/var/www/app/.env":                          finding.SeverityHigh,
 	}
 	for id, sev := range want {
 		f := hasID(got, id)
@@ -71,6 +83,9 @@ func TestAccessRule(t *testing.T) {
 		"fs:world-writable-dir:/etc/app/tmp",                       // sticky
 		"cron:writable-script:/home/alice/x.sh",                    // not a root job
 		"cron:writable-script:/etc/cron.daily/logrotate",
+		"account:sudo-nopasswd:/etc/sudoers.d/root:1",      // root needs no password
+		"secrets:world-readable:/etc/sysconfig/authconfig", // settings, not secrets
+		"cron:writable-script:/usr/sbin/ifup",              // 0777 symlink to a root-owned 0755 script
 	} {
 		if hasID(got, id) != nil {
 			t.Errorf("unexpected %s", id)
@@ -94,7 +109,8 @@ func TestSecretKeys(t *testing.T) {
 		in   string
 		want []string
 	}{
-		{"DB_PASSWORD=abc\nexport API_KEY='k'\n", []string{"API_KEY", "DB_PASSWORD"}},
+		{"DB_PASSWORD=abcd\nexport API_KEY='k3y-value'\n", []string{"API_KEY", "DB_PASSWORD"}},
+		{"PASSWDALGORITHM=sha512\nPASSWORD_POLICY=strict\nTOKEN_TTL=3600\nDB_PASSWORD_FILE=/run/x\nSECRET=yes\n", nil},
 		{"ExecStart=/usr/bin/agent --token abc123 --verbose", []string{"--token"}},
 		{"PASSWORD=${PASSWORD}\n# SECRET=x\nTOKEN=\n", nil},
 		{"MINIO_ROOT_PASSWORD: \"minio123\"", []string{"MINIO_ROOT_PASSWORD"}},
