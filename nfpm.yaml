@@ -1,40 +1,67 @@
+# nfpm config for the .deb, .rpm and .apk packages.
+#
+# Built by `make packages` (also part of `make release`), which sets:
+#   LYNC_VERSION  package version without the leading "v" (e.g. 0.2.0)
+#   LYNC_ARCH     Go architecture: amd64 | arm64 (nfpm maps it per format)
+# and copies dist/lyncd-linux-<arch> and dist/lync-linux-<arch> to dist/.pkg/
+# (nfpm does not expand variables in file paths).
+#
+#   cp dist/lyncd-linux-amd64 dist/.pkg/lyncd; cp dist/lync-linux-amd64 dist/.pkg/lync
+#   LYNC_VERSION=0.2.0 LYNC_ARCH=amd64 nfpm package -p deb -f nfpm.yaml -t dist/
 name: lync
-arch: amd64
+arch: ${LYNC_ARCH}
 platform: linux
-version: 0.1.0
+version: ${LYNC_VERSION}
+version_schema: semver
+release: "1"
 section: admin
 priority: optional
-maintainer: ryan785 <noreply@example.com>
-description: |
-  Linux vulnerability scanner. Single-binary systemd daemon that correlates
-  installed packages, kernel, and (Phase 4+) runtime state against multiple
-  CVE and advisory feeds, emitting PDF and JSON reports.
+maintainer: ryan785 <292263189+ryan785@users.noreply.github.com>
+description: Linux vulnerability scanner daemon (CVE matching, configuration audit, file-integrity monitor; JSON + PDF reports)
 homepage: https://github.com/ryan785/lync
 license: MIT
 
 contents:
-  - src: bin/lyncd
+  - src: dist/.pkg/lyncd
     dst: /usr/sbin/lyncd
     file_info:
       mode: 0755
-  - src: bin/lync
+  - src: dist/.pkg/lync
     dst: /usr/bin/lync
     file_info:
       mode: 0755
   - src: packaging/config/lync.yaml
     dst: /etc/lync/lync.yaml
     type: config|noreplace
+    file_info:
+      mode: 0644
   - src: packaging/systemd/lync.service
     dst: /usr/lib/systemd/system/lync.service
-  - dst: /etc/lync/rules.d
+    file_info:
+      mode: 0644
+  - dst: /etc/lync
     type: dir
+    file_info:
+      mode: 0755
+  - dst: /var/lib/lync
+    type: dir
+    file_info:
+      mode: 0755
   - dst: /var/lib/lync/feeds
     type: dir
+    file_info:
+      mode: 0755
   - dst: /var/lib/lync/reports
     type: dir
-  - dst: /var/log/lync
-    type: dir
+    file_info:
+      mode: 0755
 
 scripts:
   postinstall: packaging/scripts/postinstall.sh
   preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
+# apk runs pre/post-upgrade instead of the install/remove scripts on upgrade.
+apk:
+  scripts:
+    postupgrade: packaging/scripts/postupgrade.sh
