@@ -181,6 +181,22 @@ func TestWrapText(t *testing.T) {
 	}
 }
 
+func TestShortVersion(t *testing.T) {
+	cases := [][3]string{
+		{"php-fpm", "php-fpm-8.0.30-1.el9.x86_64", "8.0.30-1.el9"},
+		{"openssl-libs", "openssl-libs-1:3.0.7-27.el9.x86_64", "1:3.0.7-27.el9"},
+		{"libssl3:amd64", "libssl3:amd64-3.0.15-1~deb12u1.amd64", "3.0.15-1~deb12u1"},
+		{"login", "login-1:4.13+dfsg1-1+b1.amd64", "1:4.13+dfsg1-1+b1"},
+		{"lodash", "4.17.15", "4.17.15"},
+		{"musl", "musl-1.2.5-r0", "1.2.5-r0"},
+	}
+	for _, c := range cases {
+		if got := shortVersion(c[0], c[1]); got != c[2] {
+			t.Errorf("shortVersion(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+}
+
 func TestUpdateCommand(t *testing.T) {
 	pk := []string{"a", "b"}
 	cases := []struct {

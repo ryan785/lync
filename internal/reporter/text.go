@@ -645,10 +645,16 @@ func isKernelPackage(name string) bool {
 }
 
 // shortVersion strips the "<name>-" prefix and ".<arch>" suffix that RPM
-// NEVRA strings carry, leaving "[epoch:]version-release".
+// NEVRA strings carry, leaving "[epoch:]version-release". Debian
+// multi-arch names ("libssl3:amd64") carry the arch in the name too.
 func shortVersion(pkg, installed string) string {
 	name, _, _ := strings.Cut(pkg, ":")
-	v := strings.TrimPrefix(installed, name+"-")
+	v := installed
+	if strings.HasPrefix(v, pkg+"-") {
+		v = v[len(pkg)+1:]
+	} else {
+		v = strings.TrimPrefix(v, name+"-")
+	}
 	for _, arch := range []string{".x86_64", ".aarch64", ".noarch", ".i686", ".i386", ".ppc64le", ".s390x", ".amd64", ".arm64", ".all"} {
 		if strings.HasSuffix(v, arch) {
 			return strings.TrimSuffix(v, arch)
