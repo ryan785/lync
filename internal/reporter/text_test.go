@@ -39,6 +39,12 @@ func fixtureReport() *Report {
 		}
 		return f
 	}
+	nodeCVE := func(id, path, pkg, inst, fixed string, sev finding.Severity, fix string) finding.Finding {
+		return finding.Finding{ID: "upstream:node-cve:" + id + ":" + path, Category: finding.CategoryCVE, Severity: sev,
+			Title: id + " affects Node.js " + inst, Evidence: "path: " + path + "; installed: Node " + inst, CVE: id,
+			Package: pkg, Installed: inst, FixedIn: fixed, Remediation: fix, Source: "nodejs-security-wg",
+			Check: "upstream:node-cve", Pack: "runtimes"}
+	}
 	fs := []finding.Finding{
 		cve("CVE-2026-10001", "php-fpm", "php-fpm-8.0.30-1.el9.x86_64", "8.0.30-3.el9", finding.SeverityCritical, 9.8),
 		cve("CVE-2026-10002", "php-fpm", "php-fpm-8.0.30-1.el9.x86_64", "8.0.30-2.el9", finding.SeverityCritical, 9.1),
@@ -54,6 +60,17 @@ func fixtureReport() *Report {
 			Title: "CVE-2026-50001 affects lodash 4.17.15 (npm)", Evidence: "/srv/app/package-lock.json declares lodash 4.17.15",
 			Remediation: "upgrade lodash to >= 4.17.21 in /srv/app (npm install lodash@4.17.21)", CVE: "CVE-2026-50001",
 			Package: "lodash", Installed: "4.17.15", FixedIn: "4.17.21", CVSS: 7.4, Source: "osv"},
+		nodeCVE("CVE-2026-111497", "/root/.nvm/versions/node/v22.22.0/bin/node", "node", "22.22.0", "22.23.4", finding.SeverityHigh,
+			"nvm install 22.23.4 && nvm alias default 22.23.4 (as the owning user); then restart the apps that use it"),
+		nodeCVE("CVE-2026-58043", "/root/.nvm/versions/node/v22.22.0/bin/node", "node", "22.22.0", "22.23.2", finding.SeverityHigh,
+			"nvm install 22.23.2 && nvm alias default 22.23.2 (as the owning user); then restart the apps that use it"),
+		nodeCVE("CVE-2026-105481", "/usr/bin/node", "nodejs", "22.22.0", "22.23.4", finding.SeverityMedium,
+			"Update from the NodeSource repository: dnf update nodejs to 22.23.4 or later"),
+		{ID: "upstream:node-security-release:/opt/node-v24.21.0-linux-x64/bin/node", Category: finding.CategoryCVE, Severity: finding.SeverityHigh,
+			Check: "upstream:node-security-release", Pack: "runtimes", Title: "Node 24.21.0 is behind security release 24.22.1 (2026-10-20)",
+			Evidence:    "path: /opt/node-v24.21.0-linux-x64/bin/node; installed: Node 24.21.0 (tarball); nodejs.org/dist/index.json marks v24.22.1 (2026-10-20, LTS Krypton) as a security release",
+			Remediation: "Replace /opt/node-v24.21.0-linux-x64 with the official v24.22.1 build (https://nodejs.org/dist/v24.22.1/)",
+			Package:     "node", Installed: "24.21.0", FixedIn: "24.22.1", Source: "nodejs-release"},
 		{ID: "ssh-config:permit-root-login", Category: finding.CategoryConfig, Severity: finding.SeverityHigh, Check: "ssh-config:permit-root-login", Pack: "ssh",
 			Title: "SSH allows root login with a password", Evidence: "/etc/ssh/sshd_config: PermitRootLogin yes (line 40)",
 			Remediation: "Set 'PermitRootLogin prohibit-password' (or 'no') in /etc/ssh/sshd_config, then: systemctl reload sshd",
@@ -122,6 +139,11 @@ func TestTextReportGolden(t *testing.T) {
 		"[reboot]",
 		"libxml2",
 		"Git repository exposed under the web root",
+		"Upgrade Node.js (3 installs outside the distro packages",
+		"22.22.0 -> 22.23.4  fixes 2 CVEs (2 high)",
+		"nvm install 22.23.4",
+		"dnf update nodejs to 22.23.4",
+		"24.21.0 -> 24.22.1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("text report lacks %q", want)

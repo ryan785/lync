@@ -24,9 +24,9 @@ No fix yet  4 CVEs affect installed packages but have no fixed version published
 SUMMARY
 ----------------------------------------------------------------------------------------------------
   Critical  High  Medium  Low  Info  Unknown  Total
-         3     4       4    1     1        1     14
+         3     7       5    1     1        1     18
 
-Findings    9 vulnerability findings in 6 packages/components, 5 configuration and check findings
+Findings    13 vulnerability findings in 8 packages/components, 5 configuration and check findings
 Highest     CVSS 9.8, CVE-2026-10001 (php-fpm)
 Reboot      YES - 2 kernel finding(s) (CVE-2026-20001, CVE-2026-20002); reboot after updating the
             kernel
@@ -49,12 +49,23 @@ FIX FIRST
    No fix available yet (no fixed version published; watch for updates or mitigate):
      libxml2  2.9.13-6.el9_4  affected by 1 CVE (1 low)
 
-2) Update application components (installed outside the package manager)
+2) Upgrade Node.js (3 installs outside the distro packages: nvm, tarballs, NodeSource, images)
+
+   /root/.nvm/versions/node/v22.22.0/bin/node  22.22.0 -> 22.23.4  fixes 2 CVEs (2 high)
+     Fix         nvm install 22.23.4 && nvm alias default 22.23.4 (as the owning user); then restart
+                 the apps that use it
+   /opt/node-v24.21.0-linux-x64/bin/node  24.21.0 -> 24.22.1  fixes 1 issue (1 high)
+     Fix         Replace /opt/node-v24.21.0-linux-x64 with the official v24.22.1 build
+                 (https://nodejs.org/dist/v24.22.1/)
+   /usr/bin/node                     22.22.0 -> 22.23.4  fixes 1 CVE (1 medium)
+     Fix         Update from the NodeSource repository: dnf update nodejs to 22.23.4 or later
+
+3) Update application components (installed outside the package manager)
 
    lodash  4.17.15 -> 4.17.21  fixes 1 CVE (1 high)
      Fix         upgrade lodash to >= 4.17.21 in /srv/app (npm install lodash@4.17.21)
 
-3) Critical and high configuration findings (2)
+4) Critical and high configuration findings (2)
 
    [CRITICAL] Git repository exposed under the web root
      ID          web-exposure:dotgit:/var/www/html
@@ -65,7 +76,7 @@ FIX FIRST
      Fix         Set 'PermitRootLogin prohibit-password' (or 'no') in /etc/ssh/sshd_config, then:
                  systemctl reload sshd
 
-ALL FINDINGS (14)
+ALL FINDINGS (18)
 ----------------------------------------------------------------------------------------------------
 CRITICAL (3)
 ------------
@@ -97,7 +108,7 @@ CRITICAL (3)
      Fix         Deny dot-files in the nginx server block: location ~ /\.(?!well-known) { deny all;
                  } and move the repository out of the web root
 
-HIGH (4)
+HIGH (7)
 --------
   4. CVE-2026-20001 affects kernel
      ID          CVE-2026-20001:kernel
@@ -126,16 +137,41 @@ HIGH (4)
      Evidence    /srv/app/package-lock.json declares lodash 4.17.15
      Fix         upgrade lodash to >= 4.17.21 in /srv/app (npm install lodash@4.17.21)
 
-  7. SSH allows root login with a password
+  7. CVE-2026-111497 affects Node.js 22.22.0
+     ID          upstream:node-cve:CVE-2026-111497:/root/.nvm/versions/node/v22.22.0/bin/node
+     CVE         CVE-2026-111497
+     Package     node 22.22.0 -> 22.23.4
+     Evidence    path: /root/.nvm/versions/node/v22.22.0/bin/node; installed: Node 22.22.0
+     Fix         nvm install 22.23.4 && nvm alias default 22.23.4 (as the owning user); then restart
+                 the apps that use it
+
+  8. CVE-2026-58043 affects Node.js 22.22.0
+     ID          upstream:node-cve:CVE-2026-58043:/root/.nvm/versions/node/v22.22.0/bin/node
+     CVE         CVE-2026-58043
+     Package     node 22.22.0 -> 22.23.2
+     Evidence    path: /root/.nvm/versions/node/v22.22.0/bin/node; installed: Node 22.22.0
+     Fix         nvm install 22.23.2 && nvm alias default 22.23.2 (as the owning user); then restart
+                 the apps that use it
+
+  9. Node 24.21.0 is behind security release 24.22.1 (2026-10-20)
+     ID          upstream:node-security-release:/opt/node-v24.21.0-linux-x64/bin/node
+     Package     node 24.21.0 -> 24.22.1
+     Evidence    path: /opt/node-v24.21.0-linux-x64/bin/node; installed: Node 24.21.0 (tarball);
+                 nodejs.org/dist/index.json marks v24.22.1 (2026-10-20, LTS Krypton) as a security
+                 release
+     Fix         Replace /opt/node-v24.21.0-linux-x64 with the official v24.22.1 build
+                 (https://nodejs.org/dist/v24.22.1/)
+
+ 10. SSH allows root login with a password
      ID          ssh-config:permit-root-login
      Evidence    /etc/ssh/sshd_config: PermitRootLogin yes (line 40)
      Fix         Set 'PermitRootLogin prohibit-password' (or 'no') in /etc/ssh/sshd_config, then:
                  systemctl reload sshd
      Refs        https://man.openbsd.org/sshd_config#PermitRootLogin
 
-MEDIUM (4)
+MEDIUM (5)
 ----------
-  8. CVE-2026-30001 affects openssl-libs
+ 11. CVE-2026-30001 affects openssl-libs
      ID          CVE-2026-30001:openssl-libs
      CVE         CVE-2026-30001 CVSS 5.9
      Package     openssl-libs 1:3.0.7-27.el9 -> 1:3.0.7-28.el9_4
@@ -145,7 +181,7 @@ MEDIUM (4)
                  https://nvd.nist.gov/vuln/detail/CVE-2026-30001
                  (+1 more references in the JSON report)
 
-  9. CVE-2026-20002 affects kernel
+ 12. CVE-2026-20002 affects kernel
      ID          CVE-2026-20002:kernel
      CVE         CVE-2026-20002 CVSS 5.5
      Package     kernel 5.14.0-427.13.1.el9_4 -> 5.14.0-503.11.1.el9_5
@@ -155,21 +191,28 @@ MEDIUM (4)
                  https://nvd.nist.gov/vuln/detail/CVE-2026-20002
                  (+1 more references in the JSON report)
 
- 10. Security update pending for curl (RLSA-2026:1234)
+ 13. Security update pending for curl (RLSA-2026:1234)
      ID          pkgmgr:security-update:curl
      Package     curl 7.76.1-29.el9_4 -> 7.76.1-31.el9
      Evidence    dnf reports a security update to 7.76.1-31.el9; no CVE lookup source matched this
                  package
      Fix         dnf upgrade curl
 
- 11. Address space layout randomisation is reduced
+ 14. CVE-2026-105481 affects Node.js 22.22.0
+     ID          upstream:node-cve:CVE-2026-105481:/usr/bin/node
+     CVE         CVE-2026-105481
+     Package     nodejs 22.22.0 -> 22.23.4
+     Evidence    path: /usr/bin/node; installed: Node 22.22.0
+     Fix         Update from the NodeSource repository: dnf update nodejs to 22.23.4 or later
+
+ 15. Address space layout randomisation is reduced
      ID          hardening:aslr
      Evidence    kernel.randomize_va_space = 1
      Fix         sysctl -w kernel.randomize_va_space=2 and persist it in /etc/sysctl.d/
 
 LOW (1)
 -------
- 12. CVE-2026-40001 affects libxml2
+ 16. CVE-2026-40001 affects libxml2
      ID          CVE-2026-40001:libxml2
      CVE         CVE-2026-40001 CVSS 3.3
      Package     libxml2 2.9.13-6.el9_4 (no fix published yet)
@@ -180,13 +223,13 @@ LOW (1)
 
 INFO (1)
 --------
- 13. No default inactivity lock for new accounts
+ 17. No default inactivity lock for new accounts
      ID          accounts:inactive-default
      Evidence    useradd -D: INACTIVE=-1
 
 UNKNOWN (1)
 -----------
- 14. Critical file changed: /etc/passwd
+ 18. Critical file changed: /etc/passwd
      ID          monitor:/etc/passwd
 
 APPLICATION INVENTORY

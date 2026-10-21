@@ -253,12 +253,13 @@ type pkgGroup struct {
 	worst     int
 	kernel    bool
 	app       bool   // application component (inventory), not an OS package
+	node      bool   // upstream Node.js binary (name is its path)
 	fix       string // remediation for app components
 }
 
 func (t *textDoc) textFixFirst(r *Report, cves, others []finding.Finding) {
 	t.section("FIX FIRST")
-	osGroups, appGroups := groupByPackage(cves)
+	osGroups, appGroups, nodeGroups := groupByPackage(cves)
 	var fixable, unfixable []*pkgGroup
 	for _, g := range osGroups {
 		if g.fixed != "" {
@@ -278,7 +279,7 @@ func (t *textDoc) textFixFirst(r *Report, cves, others []finding.Finding) {
 		t.para("", "No package updates listed: the CVE section is INCOMPLETE (see above).")
 		t.blank()
 	}
-	if len(fixable)+len(unfixable)+len(appGroups)+len(urgent) == 0 {
+	if len(fixable)+len(unfixable)+len(appGroups)+len(nodeGroups)+len(urgent) == 0 {
 		if incompleteText(r.DataSources) == "" {
 			t.para("", "Nothing to fix: no package updates and no critical or high configuration findings.")
 		} else {
@@ -319,6 +320,13 @@ func (t *textDoc) textFixFirst(r *Report, cves, others []finding.Finding) {
 	if len(unfixable) > 0 {
 		t.para("   ", "No fix available yet (no fixed version published; watch for updates or mitigate):")
 		t.groupTable("     ", unfixable)
+		t.blank()
+	}
+	if len(nodeGroups) > 0 {
+		step++
+		t.para("", fmt.Sprintf("%d) Upgrade Node.js (%d installs outside the distro packages: nvm, tarballs, NodeSource, images)", step, len(nodeGroups)))
+		t.blank()
+		t.groupTable("   ", nodeGroups)
 		t.blank()
 	}
 	if len(appGroups) > 0 {
@@ -367,7 +375,7 @@ func (t *textDoc) groupTable(indent string, gs []*pkgGroup) {
 			t.line(strings.TrimRight(left, " "))
 			t.para(strings.Repeat(" ", in+nw+2), right)
 		}
-		if g.app && g.fix != "" {
+		if (g.app || g.node) && g.fix != "" {
 			t.kvIndent(strings.Repeat(" ", in+2), "Fix", g.fix)
 		}
 	}
@@ -575,23 +583,27 @@ func (t *textDoc) textCoverage(cov []finding.PackCoverage) {
 // groupByPackage groups CVE findings by package. OS packages and
 // application components (inventory findings) are returned separately,
 // each sorted worst severity first, then by finding count.
-func groupByPackage(cves []finding.Finding) (osGroups, appGroups []*pkgGroup) {
+func groupByPackage(cves []finding.Finding) (osGroups, appGroups, nodeGroups []*pkgGroup) {
 	idx := map[string]*pkgGroup{}
 	var order []*pkgGroup
 	for _, f := range cves {
-		app := isAppFinding(f)
+		node := isNodeFinding(f)
+		app := node || isAppFinding(f)
 		name := f.Package
-		if !app {
+		inst := shortVersion(f.Package, f.Installed)
+		switch {
+		case node:
+			name, inst = nodeInstallPath(f), f.Installed
+		case !app:
 			name, _, _ = strings.Cut(name, ":")
 		}
 		if name == "" {
 			name = "(unknown package)"
 		}
-		inst := shortVersion(f.Package, f.Installed)
-		key := fmt.Sprintf("%t|%s|%s", app, name, inst)
+		key := fmt.Sprintf("%t|%t|%s|%s", node, app, name, inst)
 		g := idx[key]
 		if g == nil {
-			g = &pkgGroup{name: name, installed: inst, app: app, kernel: !app && isKernelPackage(name)}
+			g = &pkgGroup{name: name, installed: inst, app: app, node: node, kernel: !app && isKernelPackage(name)}
 			idx[key] = g
 			order = append(order, g)
 		}
@@ -620,13 +632,39 @@ func groupByPackage(cves []finding.Finding) (osGroups, appGroups []*pkgGroup) {
 		return a.name < b.name
 	})
 	for _, g := range order {
-		if g.app {
+		switch {
+		case g.node:
+			nodeGroups = append(nodeGroups, g)
+		case g.app:
 			appGroups = append(appGroups, g)
-		} else {
+		default:
 			osGroups = append(osGroups, g)
 		}
 	}
-	return osGroups, appGroups
+	return osGroups, appGroups, nodeGroups
+}
+
+// isNodeFinding: an upstream Node.js finding (internal/upstream: Source
+// nodejs-release, nodejs-security-wg, nodejs-security-wg+nvd). These are
+// fixed per binary (nvm, tarball, NodeSource...), not by the OS package
+// update command.
+func isNodeFinding(f finding.Finding) bool {
+	return strings.HasPrefix(f.Source, "nodejs") && strings.HasPrefix(f.ID, "upstream:node-")
+}
+
+// nodeInstallPath is the binary path (or image:<ref>) an upstream Node
+// finding is about: "upstream:node-cve:<CVE>:<path>" or
+// "upstream:node-security-release:<path>".
+func nodeInstallPath(f finding.Finding) string {
+	if p, ok := strings.CutPrefix(f.ID, "upstream:node-security-release:"); ok {
+		return p
+	}
+	if rest, ok := strings.CutPrefix(f.ID, "upstream:node-cve:"); ok {
+		if _, p, ok := strings.Cut(rest, ":"); ok {
+			return p
+		}
+	}
+	return f.Package
 }
 
 // isAppFinding: an application-inventory finding (ID "<vuln>:<eco>/<name>@<path>")
