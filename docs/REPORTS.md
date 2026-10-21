@@ -1,11 +1,12 @@
 # Report format
 
-Every scan writes two files under `report.dir` (default
+Every scan writes three files under `report.dir` (default
 `/var/lib/lync/reports/`):
 
 ```
 lync-<timestamp>.json   # canonical, machine-readable, ~20-200 KB
 lync-<timestamp>.pdf    # rendered from JSON, human-readable
+lync-<timestamp>.txt    # rendered from JSON, plain text (less, email, Notepad)
 ```
 
 `<timestamp>` is local time in `YYYY-MM-DD_HH-MM-SS` form. Scoped scans
@@ -17,9 +18,9 @@ lync-2026-05-13_17-20-45-svc_sshd.pdf          # lync scan -service sshd
 lync-2026-05-13_17-20-47-kernel.pdf            # lync scan -kernel
 ```
 
-The JSON is the authoritative artifact. The PDF renderer reads from the
-JSON, so the two cannot drift. `lync render <json>` re-renders a PDF
-from any past JSON.
+The JSON is the authoritative artifact. The PDF and text renderers read
+from the JSON, so they cannot drift. `lync render <json>` re-renders a
+PDF from any past JSON, and `lync render <json> out.txt` the text report.
 
 ---
 
@@ -34,6 +35,7 @@ Top-level `Report` (defined in `internal/reporter/json.go`):
   "os":        { /* collector.OSInfo */ },
   "kernel":    { /* collector.KernelInfo */ },
   "package_count": 738,
+  "lync_version": "0.5.0",   // lyncd that wrote it (absent in older reports)
   "counts":    { /* see below */ },
   "impact":    { /* see below */ },
   "findings":  [ /* array of finding.Finding */ ]
@@ -223,6 +225,45 @@ Severity colors:
 
 ---
 
+## Text format
+
+The `.txt` report is the same JSON as plain UTF-8 text, wrapped at 100
+columns with ASCII separators, so it reads well in `less`, a mail body or
+Notepad, and greps cleanly. Sections, in order:
+
+- **Header**: host, OS, kernel, package and running-service counts, scan
+  time (UTC), lync version, CVE data mode, one line per data source, the
+  count of CVEs with no fix yet, and a `!! CVE SECTION INCOMPLETE` block
+  with the reasons when a source failed (the same rule as the PDF banner).
+- **SUMMARY**: findings per severity and total, how many are CVE versus
+  configuration findings, the highest CVSS (CVE and package), whether a
+  reboot is needed (kernel findings), and the running services whose
+  package has findings.
+- **FIX FIRST**: the action plan.
+  1. CVE findings grouped per package, worst severity first, e.g.
+     `php-fpm  8.0.30-1.el9 -> 8.0.30-3.el9  fixes 3 CVEs (2 critical, 1 high)`,
+     then one update command for every listed package, chosen from the
+     OS family in `os.id` / `os.id_like` (`dnf upgrade --refresh` on
+     RHEL-family 8+, `yum update` on 7, `apt-get install --only-upgrade`
+     on Debian/Ubuntu, `apk upgrade` on Alpine, `zypper update` on SUSE).
+     Kernel packages are marked `[reboot]`. Packages with no fixed
+     version yet are listed separately under "No fix available yet".
+  2. Application components (inventory findings) with their own fix.
+  3. Critical and High configuration/check findings with their
+     remediation commands.
+- **ALL FINDINGS**: numbered, grouped Critical to Info, then Unknown.
+  Each entry has the title, ID, CVE + CVSS, package `installed -> fixed`,
+  evidence, `Fix`, and up to two references.
+- **APPLICATION INVENTORY** (when the inventory ran) and **CHECK
+  COVERAGE** (packs that applied to the host, totals, packs that did
+  not apply, and skipped checks with their reasons).
+- Footer with the generation time.
+
+Findings carry redacted evidence already; the text report adds nothing
+that is not in the JSON.
+
+---
+
 ## Common jq queries
 
 ```sh
@@ -257,5 +298,6 @@ jq -r '.findings | map(select(.fixed_in=="" or .fixed_in==null)) |
 ## Retention
 
 Set `report.retention_days` in `lync.yaml` to a positive N and the daemon
-deletes `lync-*.json` / `lync-*.pdf` older than N days after every scan.
+deletes `lync-*.json` / `lync-*.pdf` / `lync-*.txt` older than N days
+after every scan.
 `0` (the default) keeps everything.

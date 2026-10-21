@@ -3,7 +3,8 @@
 Linux vulnerability scanner. A single Go binary that runs as one `systemd`
 service, correlates installed packages against multiple curated CVE feeds,
 audits host configuration for non-CVE issues, watches critical files for
-out-of-band changes, and produces a PDF + JSON report.
+out-of-band changes, and produces a JSON report rendered as PDF and as
+plain text.
 
 ```
 +----------+   +---------+   +-------------+   +-----------+   +----------+
@@ -38,9 +39,10 @@ out-of-band changes, and produces a PDF + JSON report.
   posts webhooks (generic JSON with HMAC signature, Slack, Discord, Teams)
   about new findings, newly available fixes and resolved findings, each
   once. `lync notify test` checks the channels.
-- **One-liner = PDF**: `curl ... run.sh | sudo sh` leaves the PDF report in
-  your current directory (owned by you) plus a log; see
-  [`docs/RUNNER.md`](docs/RUNNER.md).
+- **One-liner = PDF + text**: `curl ... run.sh | sudo sh` leaves the PDF
+  report and a plain-text copy (`.txt`, with a "fix first" action plan and
+  one update command) in your current directory (owned by you) plus a
+  log; see [`docs/RUNNER.md`](docs/RUNNER.md).
 - **Application inventory**: lockfiles, site-packages, jars, Go/Rust
   binaries and WordPress outside the package manager, looked up on
   OSV.dev with the same client ([`docs/INVENTORY.md`](docs/INVENTORY.md)).
@@ -106,7 +108,7 @@ notes: [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ## Scan once, install nothing
 
-Run a full scan (all feeds, judges, every check, PDF) and leave **only a
+Run a full scan (all feeds, judges, every check, PDF + text report) and leave **only a
 log file** behind. Details, cleanup guarantees and exit codes are in
 [`docs/RUNNER.md`](docs/RUNNER.md).
 
@@ -150,7 +152,7 @@ lync status
 # Trigger an immediate scan (otherwise it runs on the daily timer)
 lync scan
 lync status              # watch the active jobs table
-ls /var/lib/lync/reports # PDF + JSON appear here when the scan finishes
+ls /var/lib/lync/reports # JSON + PDF + TXT appear here when the scan finishes
 
 # Scoped scans target one package or service
 lync scan -package openssh
@@ -166,6 +168,7 @@ lync checks
 # Older reports
 lync reports
 lync render /var/lib/lync/reports/lync-2026-05-13_18-30-18.json    # regenerate PDF
+lync render /var/lib/lync/reports/lync-2026-05-13_18-30-18.json out.txt  # or the text report
 ```
 
 The first feed sync takes ~25 minutes without an NVD API key (NVD rate
@@ -182,7 +185,7 @@ seconds — see [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#nvd-api-key).
 | CLI reference | [`docs/CLI.md`](docs/CLI.md) |
 | Architecture & data flow | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | Adding feeds, judges, and rules | [`docs/EXTENDING.md`](docs/EXTENDING.md) |
-| Report format (JSON + PDF) | [`docs/REPORTS.md`](docs/REPORTS.md) |
+| Report format (JSON, PDF, text) | [`docs/REPORTS.md`](docs/REPORTS.md) |
 | Troubleshooting | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
 
 ## Status

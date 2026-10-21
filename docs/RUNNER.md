@@ -1,13 +1,14 @@
 # One-shot runner (no install)
 
 Two entry points run a full Lync scan on a host without installing
-anything. The product is a **PDF report**; the only other thing left
-behind is a log file:
+anything. The product is a **PDF report** plus the same report as
+**plain text** (`.txt`, see [REPORTS.md](REPORTS.md#text-format)); the
+only other thing left behind is a log file:
 
 | | Where you type it | Binary comes from | Report goes to | Left on the host |
 |---|---|---|---|---|
-| **(a) `lync-run`** | your workstation (Linux, macOS, Git Bash on Windows) | `./dist` (`make release`) or `gh release download`, streamed over SSH | `./lync-results/<UTC>/<host>/report.pdf` (+ JSON) on the workstation; paths printed at the end, `--open` opens them | the log |
-| **(b) `run.sh`** | on the host itself | GitHub Release asset (token for a private repo), checksum-verified | `./lync-<host>-<UTC>.pdf` in the directory you ran it from (or `--out DIR`), owned by you under sudo; `--json` adds the JSON | the log and the report |
+| **(a) `lync-run`** | your workstation (Linux, macOS, Git Bash on Windows) | `./dist` (`make release`) or `gh release download`, streamed over SSH | `./lync-results/<UTC>/<host>/report.pdf` + `report.txt` (+ JSON) on the workstation; paths printed at the end, `--open` opens them | the log |
+| **(b) `run.sh`** | on the host itself | GitHub Release asset (token for a private repo), checksum-verified | `./lync-<host>-<UTC>.pdf` + `.txt` in the directory you ran it from (or `--out DIR`), owned by you under sudo; `--json` adds the JSON | the log and the report |
 
 By default CVE data is **looked up**, not downloaded: one OSV.dev batch
 query for the installed packages, details for the advisories that hit,
@@ -61,16 +62,20 @@ Public repo (or after the repo is made public):
 cd ~ && curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh
 #   ...
 #   ==> Report: /home/you/lync-web1-20261021T080035Z.pdf
+#   ==> Text:   /home/you/lync-web1-20261021T080035Z.txt
 curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh -s -- --json --out /tmp/reports
 curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh -s -- --cve CVE-2026-109618
 ```
 
-The PDF is written to the directory you started in (falling back to
-`$HOME` if that is not writable), named `lync-<host>-<UTC>.pdf`, mode 600
-and owned by `$SUDO_USER` when run through sudo. Its path is the last
-thing printed. `--print-json` also prints the JSON report on stdout (the
-old default) for scripts; `--cve` prints the verdict JSON and writes no
-PDF.
+The PDF and the text report are written to the directory you started in
+(falling back to `$HOME` if that is not writable), named
+`lync-<host>-<UTC>.pdf` and `.txt`, mode 600 and owned by `$SUDO_USER`
+when run through sudo. Their paths are the last thing printed. The text
+report opens with a FIX FIRST action plan (package updates with one
+update command, then critical/high configuration fixes), so
+`less lync-*.txt` is often all you need on a server. `--print-json` also
+prints the JSON report on stdout (the old default) for scripts; `--cve`
+prints the verdict JSON and writes no report.
 
 Private repo (fine-grained token with *Contents: read* on ryan785/lync):
 
@@ -111,17 +116,18 @@ mirror directory (`https://...` or `file:///mnt/usb/lync`) holding
    - The package-manager cross-check reads `dnf -C updateinfo` /
      `apt-get -s dist-upgrade` (cached metadata, nothing installed).
    - The matcher, the applicability judges and all rule checks run, and
-     the PDF is rendered.
+     the PDF and text reports are rendered.
    - Each external command has a timeout (`audit.Output`, 20 s for rule
      tools, up to 5 min for `rpm -qa`).
    - Feed downloads retry with backoff. A body cut off mid-transfer is
      retried, the run falls back to HTTP/1.1 after repeated HTTP/2 stream
      errors, and a single hung attempt is cut after 3 min and retried.
 4. **Results.** Mode (a) streams `$T/out` back as tar; nothing but the log
-   stays on the host. Mode (b) copies the PDF (and with `--json` the JSON)
-   to the output directory, logs it as `REPORT+` (and `CHOWN`), and prints
-   the path last; `--cve` prints `cve-<ID>.json` to stdout. `--keep-report
-   DIR` still copies JSON+PDF to DIR as well (`KEEP`).
+   stays on the host. Mode (b) copies the PDF and the text report (and
+   with `--json` the JSON) to the output directory, logs each as `REPORT+`
+   (and `CHOWN`), and prints both paths last; `--cve` prints
+   `cve-<ID>.json` to stdout. `--keep-report DIR` still copies
+   JSON+PDF+TXT to DIR as well (`KEEP`).
 5. **Cleanup** is an `EXIT`/`INT`/`TERM`/`HUP` trap. It stops `lyncd` if
    it is still running, lists every remaining file as `FILE-`, runs `rm -rf
    $T`, checks that `$T` is really gone, and logs `CLEANUP ... verified
@@ -150,8 +156,8 @@ argv.
 
 | run.sh | lync-run | Meaning |
 |---|---|---|
-| `--out DIR` | `--out DIR` | (b) where the PDF goes (default: current directory); (a) local results root |
-| `--json` | | (b) also write the JSON report next to the PDF |
+| `--out DIR` | `--out DIR` | (b) where the PDF and text reports go (default: current directory); (a) local results root |
+| `--json` | | (b) also write the JSON report next to them |
 | `--print-json` | | (b) print the JSON report to stdout too |
 | `--full-feeds` | `--full-feeds` | bulk feed downloads instead of lookups |
 | | `--open` | open each host's PDF locally when done (xdg-open / open / start) |
@@ -317,10 +323,11 @@ Full-feed excerpt (WSL Debian 12 as the "host", mode (a) through the fake ssh, a
   - every log section is present, and the CHECK count equals `lync checks`;
   - the temp dir is removed on success, on SIGTERM mid-scan and on a
     checksum mismatch (where the binary never runs);
-  - mode (b) download from `LYNC_BASE_URL` works, the PDF (and with
-    `--json` the JSON) lands in the caller's directory, owned by
-    `SUDO_USER`, its path is printed last, `--out` and `--print-json`
-    work, and mode (a) leaves no report on the host;
+  - mode (b) download from `LYNC_BASE_URL` works, the PDF and text report
+    (and with `--json` the JSON) land in the caller's directory and
+    nothing else does, owned by `SUDO_USER`, both paths are printed last,
+    `--out` and `--print-json` work, and mode (a) returns
+    report.json/pdf/txt and leaves no report on the host;
   - `--cve` returns exit code 12;
   - no new file named `*lync*` exists outside the test dir.
 - Not yet validated end to end on a real RHEL-family host.
