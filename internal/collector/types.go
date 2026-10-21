@@ -43,7 +43,10 @@ type Package struct {
 	Epoch   int    `json:"epoch,omitempty"`
 	Arch    string `json:"arch,omitempty"`
 	Source  string `json:"source,omitempty"`
-	Manager string `json:"manager"`
+	// SourceVersion is the source package version when it differs from
+	// Version (dpkg binNMUs, packages versioned apart from their source).
+	SourceVersion string `json:"source_version,omitempty"`
+	Manager       string `json:"manager"`
 }
 
 func (p Package) NEVRA() string {

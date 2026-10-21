@@ -10,9 +10,11 @@ import (
 	"time"
 )
 
-// dpkg-query format: NAME|VERSION|ARCHITECTURE|SOURCE|STATUS
+// dpkg-query format: NAME|VERSION|ARCHITECTURE|SOURCE|STATUS|SOURCE-VERSION
 // Status filter "install ok installed" excludes half-installed/half-removed.
-const dpkgQF = `${binary:Package}|${Version}|${Architecture}|${source:Package}|${db:Status-Status}\n`
+// The source version comes last so 5-field output still parses; OSV keys
+// Debian/Ubuntu advisories by source package and source version.
+const dpkgQF = `${binary:Package}|${Version}|${Architecture}|${source:Package}|${db:Status-Status}|${source:Version}\n`
 
 // readDpkgPackages enumerates installed Debian packages via dpkg-query.
 // dpkg versions are "[epoch:]upstream[-debian]" — we keep the whole thing in
@@ -43,13 +45,17 @@ func parseDpkgQueryOutput(r interface{ Read(p []byte) (int, error) }) ([]Package
 		if parts[4] != "installed" {
 			continue
 		}
-		pkgs = append(pkgs, Package{
+		p := Package{
 			Name:    parts[0],
 			Version: parts[1],
 			Arch:    parts[2],
 			Source:  parts[3],
 			Manager: "dpkg",
-		})
+		}
+		if len(parts) > 5 && parts[5] != "" && parts[5] != parts[1] {
+			p.SourceVersion = parts[5]
+		}
+		pkgs = append(pkgs, p)
 	}
 	return pkgs, s.Err()
 }

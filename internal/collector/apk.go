@@ -5,10 +5,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/ryan785/lync/internal/audit"
+	"io"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/ryan785/lync/internal/audit"
 )
+
+// apkInstalledDB is apk's package database. Its "o:" lines carry each
+// package's origin (source package), which OSV keys Alpine advisories by.
+var apkInstalledDB = "/lib/apk/db/installed"
 
 // readApkPackages enumerates installed Alpine packages. `apk info -v` emits
 // one "<name>-<version>-r<rel>" per line. Arch info is in apk's database; we
@@ -19,10 +26,40 @@ func readApkPackages(ctx context.Context) ([]Package, error) {
 		return nil, fmt.Errorf("apk info: %w", err)
 	}
 	pkgs, parseErr := parseApkInfoOutput(bytes.NewReader(out))
+	if f, ferr := os.Open(apkInstalledDB); ferr == nil {
+		origins := parseApkOrigins(f)
+		f.Close()
+		for i := range pkgs {
+			if o := origins[pkgs[i].Name]; o != "" {
+				pkgs[i].Source = o
+			}
+		}
+	}
 	if err != nil {
 		return pkgs, fmt.Errorf("apk info: %w", err)
 	}
 	return pkgs, parseErr
+}
+
+// parseApkOrigins maps package name -> origin from apk's installed DB
+// (stanzas of "P:<name>", "V:<version>", "o:<origin>", blank-line separated).
+func parseApkOrigins(r io.Reader) map[string]string {
+	out := map[string]string{}
+	s := bufio.NewScanner(r)
+	s.Buffer(make([]byte, 64*1024), 1024*1024)
+	name := ""
+	for s.Scan() {
+		line := s.Text()
+		switch {
+		case line == "":
+			name = ""
+		case strings.HasPrefix(line, "P:"):
+			name = line[2:]
+		case strings.HasPrefix(line, "o:") && name != "":
+			out[name] = line[2:]
+		}
+	}
+	return out
 }
 
 func parseApkInfoOutput(r interface{ Read(p []byte) (int, error) }) ([]Package, error) {
