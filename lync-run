@@ -38,6 +38,8 @@ SSH=${LYNC_SSH:-ssh}
 REMOTE_LOG=""
 SOURCES=""
 REPO=${LYNC_REPO:-ryan785/lync}
+FULL_FEEDS=0
+OPEN=0
 
 usage() {
 	cat >&2 <<'EOF'
@@ -53,6 +55,9 @@ usage: lync-run [options] HOST... | -f HOSTS_FILE
   --out DIR           results root (default ./lync-results)
   --remote-log PATH   log path on the host (default /var/log/lync-run-<UTC>.log)
   --sources LIST      feeds: auto (default) | none | comma list
+  --full-feeds        download the bulk feeds on each host instead of the
+                      default per-package / per-CVE lookups (slow, ~300MB)
+  --open              open each host's PDF report when done (xdg-open/open/start)
   -f FILE             hosts, one per line (# comments ok)
 Env: LYNC_SSH (ssh command; tests use a fake), LYNC_SSH_OPTS (default: -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30)
 EOF
@@ -71,6 +76,8 @@ while [ $# -gt 0 ]; do
 	--out) [ $# -ge 2 ] || usage; OUT_ROOT=$2; shift ;;
 	-f) [ $# -ge 2 ] || usage; HOSTS_FILE=$2; shift ;;
 	--container-exec) CONTAINER_EXEC=1 ;;
+	--full-feeds) FULL_FEEDS=1 ;;
+	--open) OPEN=1 ;;
 	-h | --help) usage ;;
 	-*) echo "lync-run: unknown option $1" >&2; usage ;;
 	*) HOSTS="$HOSTS $1" ;;
@@ -123,6 +130,8 @@ field() { # KEY FILE -> first numeric value of "KEY": N
 }
 
 SUMMARY=$LOCAL_TMP/summary
+PDFS=$LOCAL_TMP/pdfs
+: >"$PDFS"
 printf '%-28s %-5s %-5s %-5s %-5s %-5s %-6s %-18s %s\n' HOST EXIT CRIT HIGH MED LOW TOTAL VERDICT REMOTE-TMP >"$SUMMARY"
 FAILED=0
 
@@ -176,6 +185,7 @@ for host in $HOSTS; do
 	[ -n "$KEEP_REPORT" ] && args="$args --keep-report $KEEP_REPORT"
 	[ -n "$REMOTE_LOG" ] && args="$args --log $REMOTE_LOG"
 	[ -n "$SOURCES" ] && args="$args --sources $SOURCES"
+	[ "$FULL_FEEDS" = 1 ] && args="$args --full-feeds"
 
 	echo "   $march ($oskey): streaming $(du -sk "$stage" | awk '{print $1}')KB bundle, running..." >&2
 	start=$(date +%s)
@@ -225,6 +235,11 @@ for host in $HOSTS; do
 	5) if [ "$verdict" = - ]; then verdict=degraded; else verdict="$verdict+degraded"; fi ;;
 	*) FAILED=1 ;;
 	esac
+	if [ -f "$hd/report.pdf" ]; then
+		pdf_abs=$(cd "$hd" && pwd)/report.pdf
+		echo "$name $pdf_abs" >>"$PDFS"
+		echo "   PDF: $pdf_abs" >&2
+	fi
 	r=$hd/report.json
 	printf '%-28s %-5s %-5s %-5s %-5s %-5s %-6s %-18s %s\n' "$name" "$rc" \
 		"$(field critical "$r")" "$(field high "$r")" "$(field medium "$r")" "$(field low "$r")" "$(field total "$r")" \
@@ -235,5 +250,30 @@ echo >&2
 cat "$SUMMARY"
 cp "$SUMMARY" "$RUN_DIR/summary.txt"
 echo "results: $RUN_DIR" >&2
+
+# open_file PATH: hand a file to the desktop's default viewer.
+open_file() {
+	if command -v xdg-open >/dev/null 2>&1; then
+		xdg-open "$1" >/dev/null 2>&1 &
+	elif [ "$(uname -s)" = Darwin ] && command -v open >/dev/null 2>&1; then
+		open "$1"
+	elif command -v cygstart >/dev/null 2>&1; then
+		cygstart "$1"
+	elif command -v start >/dev/null 2>&1; then
+		start "" "$1"
+	elif command -v explorer.exe >/dev/null 2>&1; then
+		explorer.exe "$(cygpath -w "$1" 2>/dev/null || echo "$1")"
+	else
+		echo "lync-run: no xdg-open/open/start to open $1" >&2
+	fi
+}
+if [ -s "$PDFS" ]; then
+	echo >&2
+	echo "PDF reports:" >&2
+	while read -r h p; do
+		printf '  %-28s %s\n' "$h" "$p" >&2
+		[ "$OPEN" = 1 ] && open_file "$p"
+	done <"$PDFS"
+fi
 [ "$FAILED" = 0 ] || exit 4
 exit 0

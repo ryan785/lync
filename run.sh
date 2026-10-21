@@ -4,6 +4,9 @@
 #   curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh
 #   ... | sudo sh -s -- --cve CVE-2026-109618
 #
+# The product of a run is a PDF report written to the directory you ran it
+# from (or --out DIR), owned by you when run through sudo, plus the log.
+#
 # What it does:
 #   1. creates a private temp dir (mktemp -d, mode 700) on a filesystem
 #      that allows exec and has enough space (/dev/shm, $TMPDIR, /tmp,
@@ -11,14 +14,17 @@
 #   2. puts the static lyncd binary there: downloaded from GitHub Releases
 #      (LYNC_GH_TOKEN for a private repo) or received over SSH from
 #      lync-run (--bundle-stdin); the SHA256 is verified before it runs;
-#   3. runs one scan (or one --cve check) at low priority with a timeout:
-#      feeds download into the temp dir, the report is written there;
-#   4. hands the report back (stdout, --keep-report DIR, or a tar stream
-#      for lync-run), then removes the temp dir on exit, Ctrl-C, SIGTERM
-#      or SSH hangup.
-# The only file left on the host is the log (default
+#   3. runs one scan (or one --cve check) at low priority with a timeout.
+#      By default CVE data is looked up per package (OSV.dev) and per CVE
+#      (NVD, Red Hat) instead of downloading whole feeds; --full-feeds
+#      downloads the bulk feeds into the temp dir instead;
+#   4. writes the PDF report (and with --json the JSON) to the current
+#      directory or --out DIR (or streams it back to lync-run), then
+#      removes the temp dir on exit, Ctrl-C, SIGTERM or SSH hangup.
+# Besides the report, the only file left on the host is the log (default
 # /var/log/lync-run-<UTC>.log as root, else ~/lync-run-<UTC>.log), which
-# records every command, download, file and check.
+# records every command, download, file and check. Under lync-run nothing
+# but the log stays on the host.
 #
 # Exit codes: 0 ok | 1 usage | 2 preflight (temp space, arch, tools) |
 # 3 download/checksum | 4 scan failed | 5 report produced but a feed
@@ -26,20 +32,26 @@
 #
 # Environment: LYNC_GH_TOKEN, LYNC_REPO (ryan785/lync), LYNC_VERSION
 # (latest | vX.Y.Z), LYNC_BASE_URL (mirror dir holding lyncd-linux-<arch>
-# + SHA256SUMS), LYNC_NVD_KEY, LYNC_LOG, LYNC_MIN_FREE_MB (300),
-# LYNC_TIMEOUT (seconds, 3600).
+# + SHA256SUMS), LYNC_NVD_KEY, LYNC_LOG, LYNC_MIN_FREE_MB (64; 400 with
+# --full-feeds), LYNC_TIMEOUT (seconds, 3600).
 
 set -u
 umask 077
 
 REPO=${LYNC_REPO:-ryan785/lync}
 VERSION=${LYNC_VERSION:-latest}
-MIN_FREE_MB=${LYNC_MIN_FREE_MB:-300}
+MIN_FREE_MB=${LYNC_MIN_FREE_MB:-}
 RUN_TIMEOUT=${LYNC_TIMEOUT:-3600}
 CVE=""
 SOURCES="auto"
 CACHE_SRC=""
 KEEP_DIR=""
+OUT_DIR=""
+WANT_JSON=0
+PRINT_JSON=0
+FULL_FEEDS=0
+START_CWD=$(pwd)
+REPORT_OUT=""
 CONTAINER_EXEC=0
 BUNDLE_STDIN=0
 TAR_OUT=0
@@ -51,10 +63,17 @@ FINAL_RC=0
 
 usage() {
 	cat >&2 <<'EOF'
-usage: run.sh [--cve CVE-ID] [--keep-report DIR] [--cache DIR] [--sources auto|LIST]
-              [--container-exec] [--log FILE] [--min-free-mb N] [--timeout SECS]
-  --cve ID          check one CVE instead of a full scan (exit 0/10/11/12)
-  --keep-report DIR also copy report JSON+PDF to DIR (default: JSON to stdout only)
+usage: run.sh [--out DIR] [--json] [--cve CVE-ID] [--full-feeds] [--cache DIR]
+              [--sources auto|none|LIST] [--container-exec] [--log FILE]
+              [--min-free-mb N] [--timeout SECS] [--print-json]
+  --out DIR         where the PDF report goes (default: the current directory)
+  --json            also write the JSON report next to the PDF
+  --print-json      print the JSON report to stdout (scripting)
+  --cve ID          check one CVE instead of a full scan (verdict JSON on
+                    stdout, exit 0/10/11/12)
+  --full-feeds      download the bulk feeds (hundreds of MB, slow) instead
+                    of per-package/per-CVE lookups
+  --keep-report DIR also copy the report JSON+PDF to DIR
   --cache DIR       seed the feed cache from DIR (copied; DIR is not modified)
   --container-exec  enable the opt-in `docker exec php -r` check
   --log FILE        log path (default /var/log/lync-run-<UTC>.log as root)
@@ -67,6 +86,10 @@ while [ $# -gt 0 ]; do
 	case $1 in
 	--cve) [ $# -ge 2 ] || usage; CVE=$2; shift ;;
 	--keep-report) [ $# -ge 2 ] || usage; KEEP_DIR=$2; shift ;;
+	--out) [ $# -ge 2 ] || usage; OUT_DIR=$2; shift ;;
+	--json) WANT_JSON=1 ;;
+	--print-json) PRINT_JSON=1 ;;
+	--full-feeds) FULL_FEEDS=1 ;;
 	--cache) [ $# -ge 2 ] || usage; CACHE_SRC=$2; shift ;;
 	--sources) [ $# -ge 2 ] || usage; SOURCES=$2; shift ;;
 	--log) [ $# -ge 2 ] || usage; LOG=$2; shift ;;
@@ -86,6 +109,13 @@ case $CVE in
 "" | CVE-[0-9][0-9][0-9][0-9]-[0-9]*) ;;
 *) echo "run.sh: --cve wants CVE-YYYY-NNNN" >&2; exit 1 ;;
 esac
+FEED_MODE=lookup
+[ "$FULL_FEEDS" = 1 ] && FEED_MODE=full
+if [ -z "$MIN_FREE_MB" ]; then
+	# Lookup mode needs the binary (~10MB) and small caches; full mode
+	# downloads ~300MB of feeds into the temp dir.
+	if [ "$FEED_MODE" = full ]; then MIN_FREE_MB=400; else MIN_FREE_MB=64; fi
+fi
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 if [ -z "$LOG" ]; then
@@ -159,9 +189,16 @@ cleanup() {
 			log CLEANUP "removed $T ($n files, ${kb:-0}KB); verified absent"
 		fi
 	fi
-	log END "exit=$rc log=$LOG (the only file this run leaves on the host)"
+	if [ -n "$REPORT_OUT" ]; then
+		log END "exit=$rc log=$LOG report=$REPORT_OUT (the files this run leaves on the host)"
+	else
+		log END "exit=$rc log=$LOG (the only file this run leaves on the host)"
+	fi
 	say "done (exit $rc). Log: $LOG"
 	printf 'LYNC_LOG_PATH=%s\n' "$LOG" >&2
+	if [ -n "$REPORT_OUT" ]; then
+		printf '\n  ==> Report: %s\n\n' "$REPORT_OUT" >&2
+	fi
 	exit "$rc"
 }
 trap cleanup EXIT
@@ -171,14 +208,41 @@ trap 'FINAL_RC=129; exit 129' HUP
 
 # --- start ---------------------------------------------------------------------
 
-log START "lync run.sh pid=$$ user=$(id -un 2>/dev/null)($(id -u)) cwd=$(pwd) args: cve=${CVE:-none} sources=$SOURCES keep_report=${KEEP_DIR:-no} cache=${CACHE_SRC:-none} container_exec=$CONTAINER_EXEC bundle_stdin=$BUNDLE_STDIN"
-log POLICY "read-only scan: this run writes only inside its temp dir and to this log; it installs nothing and changes no system state"
+log START "lync run.sh pid=$$ user=$(id -un 2>/dev/null)($(id -u)) cwd=$START_CWD args: cve=${CVE:-none} feed_mode=$FEED_MODE sources=$SOURCES out=${OUT_DIR:-cwd} json=$WANT_JSON keep_report=${KEEP_DIR:-no} cache=${CACHE_SRC:-none} container_exec=$CONTAINER_EXEC bundle_stdin=$BUNDLE_STDIN"
+REPORT_KINDS=PDF
+[ "$WANT_JSON" = 1 ] && REPORT_KINDS=PDF+JSON
+if [ "$TAR_OUT" = 1 ] || [ -n "$CVE" ]; then
+	log POLICY "read-only scan: this run writes only inside its temp dir and to this log; it installs nothing and changes no system state"
+else
+	log POLICY "read-only scan: this run writes only inside its temp dir, to this log, and the report ($REPORT_KINDS) in ${OUT_DIR:-$START_CWD}; it installs nothing and changes no system state"
+fi
+[ "$FEED_MODE" = lookup ] && [ "$SOURCES" != none ] &&
+	log PRIVACY "lookup mode: installed package names+versions (and application components found on disk) go to api.osv.dev, matched CVE ids to NVD (and Red Hat on RHEL-family hosts); use --full-feeds to download feeds instead"
 log HOST "hostname=$(hostname 2>/dev/null) uname=$(uname -srvm 2>/dev/null)"
 if [ -r /etc/os-release ]; then
 	# shellcheck disable=SC1091
 	log HOST "os=$(. /etc/os-release && echo "$PRETTY_NAME")"
 fi
 log HOST "uptime=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)s"
+
+# --- report destination (mode b) ----------------------------------------------
+
+# The PDF is the deliberate product of an on-host run: check now, not
+# after a scan, that it can be written.
+if [ "$TAR_OUT" = 0 ] && [ -z "$CVE" ]; then
+	if [ -z "$OUT_DIR" ]; then
+		OUT_DIR=$START_CWD
+		if [ ! -w "$OUT_DIR" ]; then
+			log WARN "current directory $OUT_DIR is not writable; writing the report to ${HOME:-/tmp}"
+			say "current directory $OUT_DIR is not writable; the report goes to ${HOME:-/tmp}"
+			OUT_DIR=${HOME:-/tmp}
+		fi
+	fi
+	mkdir -p "$OUT_DIR" 2>/dev/null
+	if [ ! -d "$OUT_DIR" ] || [ ! -w "$OUT_DIR" ]; then
+		die 1 "--out $OUT_DIR is not a writable directory"
+	fi
+fi
 [ "$(id -u)" = 0 ] || log WARN "not running as root: shadow, sudoers, other users' files and some tools will be unreadable; results will be incomplete"
 
 # --- arch ----------------------------------------------------------------------
@@ -356,7 +420,7 @@ log BIN "$("$BIN" -version 2>&1)"
 
 # --- run -----------------------------------------------------------------------------
 
-set -- -once -config none -sources "$SOURCES" -cache-dir "$T/cache" -report-dir "$T/out" -audit-log "$LOG"
+set -- -once -config none -feed-mode "$FEED_MODE" -sources "$SOURCES" -cache-dir "$T/cache" -report-dir "$T/out" -audit-log "$LOG"
 [ -n "$CVE" ] && set -- "$@" -cve "$CVE"
 [ "$CONTAINER_EXEC" = 1 ] && set -- "$@" -enable container:php-upload-progress
 
@@ -386,6 +450,29 @@ esac
 
 # --- hand results back ---------------------------------------------------------------
 
+# write_report JSON: copy the PDF (and with --json the JSON) into OUT_DIR
+# as lync-<host>-<UTC>.pdf, owned by the sudo caller.
+write_report() {
+	pdf=${1%.json}.pdf
+	base=$OUT_DIR/lync-$(hostname 2>/dev/null | cut -d. -f1)-$TS
+	if [ -f "$pdf" ] && cp "$pdf" "$base.pdf"; then
+		REPORT_OUT=$base.pdf
+		log REPORT+ "$base.pdf $(wc -c <"$base.pdf" | tr -d ' ')B (the report: the deliberate product of this run)"
+	else
+		log ERROR "could not write the PDF report to $OUT_DIR"
+		say "could not write the PDF report to $OUT_DIR"
+	fi
+	if [ "$WANT_JSON" = 1 ] && cp "$1" "$base.json"; then
+		log REPORT+ "$base.json $(wc -c <"$base.json" | tr -d ' ')B"
+		[ -z "$REPORT_OUT" ] && REPORT_OUT=$base.json
+	fi
+	if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+		for f in "$base.pdf" "$base.json"; do
+			[ -f "$f" ] && chown "$SUDO_USER" "$f" 2>/dev/null && log CHOWN "$f -> $SUDO_USER"
+		done
+	fi
+}
+
 REPORT=""
 for f in "$T/out"/lync-*.json; do
 	[ -f "$f" ] && REPORT=$f && break
@@ -405,9 +492,16 @@ if [ "$TAR_OUT" = 1 ]; then
 	[ "$SAVE_CACHE" = 1 ] && [ -d "$T/cache" ] && cp -R "$T/cache" "$T/out/cache"
 	(cd "$T/out" && tar -cf - .)
 	log OUTPUT "streamed $(find "$T/out" -type f | wc -l | tr -d ' ') result files to the caller over stdout"
-elif [ -n "$RESULT" ] && [ -f "$RESULT" ]; then
-	cat "$RESULT"
-	log OUTPUT "printed $(basename "$RESULT") to stdout"
+else
+	if [ -n "$CVE" ] || [ "$PRINT_JSON" = 1 ]; then
+		if [ -n "$RESULT" ] && [ -f "$RESULT" ]; then
+			cat "$RESULT"
+			log OUTPUT "printed $(basename "$RESULT") to stdout"
+		fi
+	fi
+	if [ -z "$CVE" ] && [ -n "$REPORT" ]; then
+		write_report "$REPORT"
+	fi
 fi
 if [ -n "$REPORT" ]; then
 	summary=$(tr ',' '\n' <"$REPORT" | awk -F: '/"(critical|high|medium|low|total)"/ {gsub(/[ "{}]/,""); printf "%s=%s ", $1, $2}' | head -c 200)
