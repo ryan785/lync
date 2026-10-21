@@ -324,7 +324,11 @@ func (t *textDoc) textFixFirst(r *Report, cves, others []finding.Finding) {
 	}
 	if len(nodeGroups) > 0 {
 		step++
-		t.para("", fmt.Sprintf("%d) Upgrade Node.js (%d installs outside the distro packages: nvm, tarballs, NodeSource, images)", step, len(nodeGroups)))
+		what := fmt.Sprintf("%d installs", len(nodeGroups))
+		if len(nodeGroups) == 1 {
+			what = "1 install"
+		}
+		t.para("", fmt.Sprintf("%d) Upgrade Node.js (%s outside the distro packages: nvm, tarballs, NodeSource, images)", step, what))
 		t.blank()
 		t.groupTable("   ", nodeGroups)
 		t.blank()
