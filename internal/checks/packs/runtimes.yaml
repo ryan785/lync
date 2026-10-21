@@ -1,0 +1,159 @@
+pack: runtimes
+title: Application runtimes (Node.js/PM2, Python WSGI servers, Java)
+description: How application runtimes are started and exposed - process users, debug/inspector ports and remote-management flags left on in production.
+category: runtime
+references:
+  - https://nodejs.org/en/learn/getting-started/security-best-practices
+test_base:
+  files:
+    /etc/passwd: "root:x:0:0:root:/root:/bin/bash\napp:x:1000:1000::/home/app:/bin/bash\n"
+    /proc/1/comm: "systemd\n"
+    /proc/1/status: "Name:\tsystemd\nUid:\t0\t0\t0\t0\n"
+checks:
+  - id: pm2:daemon-root
+    title: PM2 runs as root
+    description: The PM2 God daemon and every app it starts run as root, so a remote code execution bug in any Node.js app is a full host compromise. pm2 startup creates pm2-root.service when run as root.
+    severity: medium
+    applies_if:
+      any:
+        - binary: pm2
+        - file: [/usr/lib/node_modules/pm2, /usr/local/lib/node_modules/pm2, /etc/systemd/system/pm2-root.service]
+    probe: {type: process, process: "^PM2 v"}
+    expect: [uid ne 0]
+    remediation: Run PM2 under a dedicated unprivileged user (pm2 startup systemd -u app --hp /home/app) and remove pm2-root.service.
+    fix: "pm2 unstartup systemd; sudo -u app pm2 start ecosystem.config.js && pm2 startup systemd -u app --hp /home/app"
+    references: [https://pm2.keymetrics.io/docs/usage/startup/]
+    tests:
+      pass:
+        files: {/usr/local/bin/pm2: "", "/proc/200/comm": "PM2 v5.3.0: God\n", "/proc/200/status": "Name:\tPM2\nUid:\t1000\t1000\t1000\t1000\n"}
+      fail:
+        files: {/usr/local/bin/pm2: "", "/proc/200/comm": "PM2 v5.3.0: God\n", "/proc/200/status": "Name:\tPM2\nUid:\t0\t0\t0\t0\n"}
+      na: {files: {}}
+
+  - id: node:process-root
+    title: Node.js process runs as root
+    description: A node process running as root turns any application-level RCE (deserialisation, template injection, vulnerable dependency) into root on the host.
+    severity: low
+    applies_if: {binary: [node, nodejs]}
+    probe: {type: process, process: "^(node|nodejs)$"}
+    expect: [uid ne 0]
+    remediation: Run the service as an unprivileged user (User= in the systemd unit); use a reverse proxy or CAP_NET_BIND_SERVICE for ports below 1024.
+    tests:
+      pass: {files: {/usr/bin/node: "", "/proc/300/comm": "node\n", "/proc/300/status": "Uid:\t1000\t1000\t1000\t1000\n"}}
+      fail: {files: {/usr/bin/node: "", "/proc/300/comm": "node\n", "/proc/300/status": "Uid:\t0\t0\t0\t0\n"}}
+
+  - id: node:inspector-exposed
+    title: Node.js inspector listening on a network address
+    description: The V8 inspector (--inspect, port 9229) allows arbitrary code execution in the process to anyone who can connect; it has no authentication.
+    severity: critical
+    level: basic
+    applies_if: {binary: [node, nodejs]}
+    probe: {type: listener, ports: [9229, 9230], process: "^(node|nodejs)$"}
+    expect: [loopback eq true]
+    remediation: Remove --inspect from production start scripts, or bind it to 127.0.0.1 (--inspect=127.0.0.1:9229) and use an SSH tunnel.
+    references: [https://nodejs.org/en/learn/getting-started/debugging#security-implications]
+    tests:
+      pass: {files: {/usr/bin/node: ""}, cmds: {"ss -H -tulnp": 'tcp LISTEN 0 511 127.0.0.1:9229 0.0.0.0:* users:(("node",pid=300,fd=20))'}}
+      fail: {files: {/usr/bin/node: ""}, cmds: {"ss -H -tulnp": 'tcp LISTEN 0 511 0.0.0.0:9229 0.0.0.0:* users:(("node",pid=300,fd=20))'}}
+
+  - id: gunicorn:bind-public
+    title: gunicorn bound to all interfaces in a systemd unit
+    description: gunicorn is designed to sit behind a reverse proxy; serving it directly on 0.0.0.0 bypasses the proxy's TLS, buffering (slow-client DoS protection) and access controls.
+    severity: low
+    applies_if: {binary: gunicorn}
+    probe:
+      type: content
+      path: [/etc/systemd/system/*.service, /etc/systemd/system/*.service.d/*.conf]
+      regex: 'gunicorn\b.*(-b|--bind)[= ]+(0\.0\.0\.0|\[::\]|\*):'
+    expect: [match eq false]
+    remediation: Bind gunicorn to 127.0.0.1 or a Unix socket and publish it through nginx/Apache.
+    references: [https://docs.gunicorn.org/en/stable/deploy.html]
+    tests:
+      pass: {files: {/usr/local/bin/gunicorn: "", /etc/systemd/system/app.service: "[Service]\nExecStart=/srv/app/venv/bin/gunicorn --bind unix:/run/app.sock app:app\n"}}
+      fail: {files: {/usr/local/bin/gunicorn: "", /etc/systemd/system/app.service: "[Service]\nExecStart=/srv/app/venv/bin/gunicorn -b 0.0.0.0:8000 app:app\n"}}
+
+  - id: uwsgi:uid-root
+    title: uWSGI app {_key} is configured to run as root
+    description: uid = root (or 0) makes every request handler run as root; any application bug is a host compromise.
+    severity: medium
+    applies_if: {any: [{binary: uwsgi}, {package: [uwsgi, uwsgi-core]}]}
+    probe:
+      type: config
+      format: ini
+      path: [/etc/uwsgi/apps-enabled/*.ini, /etc/uwsgi.d/*.ini, /etc/uwsgi/vassals/*.ini]
+      section: uwsgi
+      key: uid
+      per_file: true
+      default: ""
+    expect: ["value not_in root,0"]
+    remediation: Set uid/gid to an unprivileged account (e.g. www-data or a per-app user).
+    references: [https://uwsgi-docs.readthedocs.io/en/latest/ThingsToKnow.html]
+    tests:
+      pass: {files: {/usr/bin/uwsgi: "", /etc/uwsgi/apps-enabled/app.ini: "[uwsgi]\nuid = www-data\nsocket = /run/uwsgi/app.sock\n"}}
+      fail: {files: {/usr/bin/uwsgi: "", /etc/uwsgi/apps-enabled/app.ini: "[uwsgi]\nuid = root\n"}}
+
+  - id: uwsgi:http-public
+    title: uWSGI HTTP router listening on all interfaces ({_key})
+    description: The built-in http router exposed on 0.0.0.0 bypasses the reverse proxy; uWSGI recommends a socket behind nginx for production.
+    severity: low
+    applies_if: {any: [{binary: uwsgi}, {package: [uwsgi, uwsgi-core]}]}
+    probe:
+      type: config
+      format: ini
+      path: [/etc/uwsgi/apps-enabled/*.ini, /etc/uwsgi.d/*.ini, /etc/uwsgi/vassals/*.ini]
+      section: uwsgi
+      key: http
+      per_file: true
+      default: ""
+    expect: ['value not_regex ^(0\.0\.0\.0|\[::\])?:\d+$']
+    remediation: Use socket = /run/uwsgi/app.sock (or 127.0.0.1:port) and proxy with uwsgi_pass.
+    references: [https://uwsgi-docs.readthedocs.io/en/latest/HTTP.html]
+    tests:
+      pass: {files: {/usr/bin/uwsgi: "", /etc/uwsgi.d/app.ini: "[uwsgi]\nhttp = 127.0.0.1:8080\n"}}
+      fail: {files: {/usr/bin/uwsgi: "", /etc/uwsgi.d/app.ini: "[uwsgi]\nhttp = :8080\n"}}
+
+  - id: uwsgi:vassal-world-writable
+    title: uWSGI vassal config {path} is world-writable
+    description: The uWSGI emperor starts every vassal file it finds; a world-writable vassal lets any local user run code as the app user (or root without tyrant mode).
+    severity: high
+    applies_if: {any: [{binary: uwsgi}, {package: [uwsgi, uwsgi-core]}]}
+    probe: {type: file, path: [/etc/uwsgi/apps-enabled/*.ini, /etc/uwsgi.d/*.ini, /etc/uwsgi/vassals/*.ini]}
+    expect: ["mode bits_none 0002"]
+    remediation: Remove world write permission.
+    fix: "chmod o-w {path}"
+    tests:
+      pass: {files: {/usr/bin/uwsgi: "", /etc/uwsgi.d/app.ini: "[uwsgi]\n"}, meta: {/etc/uwsgi.d/app.ini: "0640 1000 1000"}}
+      fail: {files: {/usr/bin/uwsgi: "", /etc/uwsgi.d/app.ini: "[uwsgi]\n"}, meta: {/etc/uwsgi.d/app.ini: "0666 1000 1000"}}
+
+  - id: java:jmx-no-auth
+    title: Java JMX remote access enabled without authentication
+    description: -Dcom.sun.management.jmxremote.authenticate=false exposes JMX to anyone who reaches the port; JMX allows loading arbitrary MBeans, i.e. remote code execution.
+    severity: high
+    applies_if: {any: [{binary: java}, {file: [/usr/lib/jvm, /opt/java]}]}
+    probe:
+      type: content
+      path: [/etc/systemd/system/*.service, /etc/systemd/system/*.service.d/*.conf, /etc/default/*, /etc/sysconfig/*, /etc/tomcat*/tomcat.conf, /usr/share/tomcat*/bin/setenv.sh, /opt/*/bin/setenv.sh]
+      regex: 'jmxremote\.authenticate=false'
+    expect: [match eq false]
+    remediation: Enable JMX authentication and SSL (jmxremote.password/access files) or bind JMX to localhost and tunnel over SSH.
+    references: [https://docs.oracle.com/en/java/javase/21/management/monitoring-and-management-using-jmx-technology.html]
+    tests:
+      pass: {files: {/usr/bin/java: "", /etc/systemd/system/app.service: "[Service]\nExecStart=/usr/bin/java -jar /opt/app/app.jar\n"}}
+      fail: {files: {/usr/bin/java: "", /etc/sysconfig/app: "JAVA_OPTS=\"-Dcom.sun.management.jmxremote.port=9010 -Dcom.sun.management.jmxremote.authenticate=false\"\n"}}
+
+  - id: java:jdwp-exposed
+    title: Java debug agent (JDWP) listening on all interfaces
+    description: JDWP has no authentication; -agentlib:jdwp with address=*:port lets anyone who can connect execute code in the JVM.
+    severity: critical
+    level: basic
+    applies_if: {any: [{binary: java}, {file: [/usr/lib/jvm, /opt/java]}]}
+    probe:
+      type: content
+      path: [/etc/systemd/system/*.service, /etc/systemd/system/*.service.d/*.conf, /etc/default/*, /etc/sysconfig/*, /etc/tomcat*/tomcat.conf, /usr/share/tomcat*/bin/setenv.sh, /opt/*/bin/setenv.sh]
+      regex: 'agentlib:jdwp=\S*address=(\*|0\.0\.0\.0):\d+'
+    expect: [match eq false]
+    remediation: Remove the JDWP agent from production JVM options (or bind it to 127.0.0.1).
+    references: [https://docs.oracle.com/en/java/javase/21/docs/specs/jpda/conninv.html]
+    tests:
+      pass: {files: {/usr/bin/java: "", /etc/default/app: "JAVA_OPTS=-Xmx512m\n"}}
+      fail: {files: {/usr/bin/java: "", /etc/default/app: "JAVA_OPTS=-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005\n"}}

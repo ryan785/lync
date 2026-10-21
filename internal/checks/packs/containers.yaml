@@ -1,0 +1,154 @@
+pack: containers
+title: Podman, containerd and CRI-O
+description: Socket permissions and configuration of container runtimes other than Docker, and the runtime settings of running Podman containers (read with `podman ps -q` + `podman inspect`).
+category: config
+references:
+  - https://docs.podman.io/en/latest/markdown/podman-run.1.html
+  - https://github.com/containerd/containerd/blob/main/docs/man/containerd-config.toml.5.md
+test_base:
+  files:
+    /usr/bin/podman: ""
+  cmds:
+    podman ps -q: "abc\n"
+checks:
+  # ---- podman containers ---------------------------------------------------
+  - id: podman:container-privileged
+    title: Podman container {name} runs privileged
+    description: --privileged gives the container all capabilities and host devices; a rootful privileged container can take over the host.
+    severity: high
+    applies_if: {binary: podman}
+    probe: {type: container, runtime: podman}
+    expect: [privileged eq false]
+    remediation: Drop --privileged and grant only the capabilities or devices required.
+    tests:
+      pass: {cmds: {podman inspect abc: '[{"Name":"web","Config":{"User":"1000"},"HostConfig":{"Privileged":false},"Mounts":[]}]'}}
+      fail: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{"Privileged":true},"Mounts":[]}]'}}
+      na: {files: {/usr/bin/podman: "!absent"}}
+      skip: {cmds: {podman ps -q: "!fail"}}
+
+  - id: podman:container-socket-mount
+    title: Podman container {name} has a container-runtime socket mounted
+    description: A container with podman.sock, docker.sock or containerd.sock mounted can create privileged containers on the host.
+    severity: critical
+    applies_if: {binary: podman}
+    probe: {type: container, runtime: podman}
+    expect: [docker_sock eq false]
+    remediation: Remove the socket bind mount or put a read-only API proxy in front of it.
+    tests:
+      pass: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{},"Mounts":[{"Source":"/srv/data","Destination":"/data"}]}]'}}
+      fail: {cmds: {podman inspect abc: '[{"Name":"ci","Config":{},"HostConfig":{},"Mounts":[{"Source":"/run/podman/podman.sock","Destination":"/var/run/docker.sock"}]}]'}}
+
+  - id: podman:container-host-pid
+    title: Podman container {name} shares the host PID namespace
+    description: --pid=host exposes every host process to the container.
+    severity: high
+    applies_if: {binary: podman}
+    probe: {type: container, runtime: podman}
+    expect: [pid_mode ne host]
+    remediation: Remove --pid=host.
+    tests:
+      pass: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{"PidMode":"private"},"Mounts":[]}]'}}
+      fail: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{"PidMode":"host"},"Mounts":[]}]'}}
+
+  - id: podman:container-host-network
+    title: Podman container {name} uses the host network namespace
+    description: --network=host removes network isolation; the container can reach localhost-only services and bind any port.
+    severity: medium
+    applies_if: {binary: podman}
+    probe: {type: container, runtime: podman}
+    expect: [network_mode ne host]
+    remediation: Use a bridge/pasta network and publish only the needed ports.
+    tests:
+      pass: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{"NetworkMode":"bridge"},"Mounts":[]}]'}}
+      fail: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{"NetworkMode":"host"},"Mounts":[]}]'}}
+
+  - id: podman:container-sensitive-mount
+    title: Podman container {name} bind-mounts a sensitive host directory
+    description: Mounting /, /etc, /root, /boot, /proc, /sys, /dev or /run from the host lets the container read secrets or change host configuration.
+    severity: high
+    applies_if: {binary: podman}
+    probe: {type: container, runtime: podman}
+    expect: [sensitive_mounts empty]
+    remediation: Mount only specific subdirectories, read-only where possible.
+    tests:
+      pass: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{},"Mounts":[{"Source":"/srv/web","Destination":"/www"}]}]'}}
+      fail: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{},"Mounts":[{"Source":"/etc","Destination":"/host-etc"}]}]'}}
+
+  - id: podman:container-dangerous-caps
+    title: Podman container {name} adds dangerous capabilities ({cap_add})
+    description: CAP_SYS_ADMIN, SYS_MODULE, SYS_PTRACE, DAC_READ_SEARCH, SYS_RAWIO, BPF or ALL each allow known container escapes.
+    severity: high
+    applies_if: {binary: podman}
+    probe: {type: container, runtime: podman}
+    expect: ["cap_add has_none all,sys_admin,cap_sys_admin,sys_module,cap_sys_module,sys_ptrace,cap_sys_ptrace,dac_read_search,cap_dac_read_search,sys_rawio,cap_sys_rawio,bpf,cap_bpf"]
+    remediation: Remove the capability from --cap-add.
+    tests:
+      pass: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{"CapAdd":["CAP_NET_BIND_SERVICE"]},"Mounts":[]}]'}}
+      fail: {cmds: {podman inspect abc: '[{"Name":"web","Config":{},"HostConfig":{"CapAdd":["CAP_SYS_ADMIN"]},"Mounts":[]}]'}}
+
+  # ---- runtime sockets and config ------------------------------------------
+  - id: podman:socket-perms
+    title: Rootful Podman API socket is writable by non-root users
+    description: The rootful podman.sock is a root-equivalent API; any user who can write to it can start privileged containers.
+    severity: critical
+    applies_if: {file: /run/podman/podman.sock}
+    probe: {type: file, path: /run/podman/podman.sock}
+    expect: ["mode bits_none 0002", "mode bits_none 0020 || gid eq 0"]
+    remediation: Restore the socket to root:root 0660 (SocketMode/SocketGroup in podman.socket) and remove any chmod in drop-ins.
+    fix: "systemctl cat podman.socket; chown root:root /run/podman/podman.sock && chmod 660 /run/podman/podman.sock"
+    references: [https://docs.podman.io/en/latest/markdown/podman-system-service.1.html]
+    tests:
+      pass: {files: {/run/podman/podman.sock: ""}, meta: {/run/podman/podman.sock: "s0660 0 0"}}
+      fail: {files: {/run/podman/podman.sock: ""}, meta: {/run/podman/podman.sock: "s0666 0 0"}}
+      na: {files: {}}
+
+  - id: containerd:socket-perms
+    title: containerd socket is writable by non-root users
+    description: containerd.sock gives full control of containers and images (and therefore the host) to anyone who can write to it.
+    severity: critical
+    applies_if: {file: /run/containerd/containerd.sock}
+    probe: {type: file, path: /run/containerd/containerd.sock}
+    expect: ["mode bits_none 0002", "mode bits_none 0020 || gid eq 0"]
+    remediation: Restore root:root 0660 on the socket ([grpc] uid/gid in /etc/containerd/config.toml).
+    fix: "chown root:root /run/containerd/containerd.sock && chmod 660 /run/containerd/containerd.sock"
+    tests:
+      pass: {files: {/run/containerd/containerd.sock: ""}, meta: {/run/containerd/containerd.sock: "s0660 0 0"}}
+      fail: {files: {/run/containerd/containerd.sock: ""}, meta: {/run/containerd/containerd.sock: "s0660 0 1000"}}
+
+  - id: containerd:grpc-tcp
+    title: containerd gRPC API is exposed over TCP
+    description: "[grpc] tcp_address exposes the containerd API on the network; with no TLS client verification anyone reaching it controls all containers."
+    severity: high
+    applies_if: {file: /etc/containerd/config.toml}
+    probe: {type: content, path: /etc/containerd/config.toml, regex: '^\s*tcp_address\s*=\s*"[^"]+"'}
+    expect: [match eq false]
+    remediation: Remove tcp_address (keep the Unix socket) or require tcp_tls_ca client certificates and bind to a private address.
+    tests:
+      pass: {files: {/etc/containerd/config.toml: "[grpc]\n  address = \"/run/containerd/containerd.sock\"\n  tcp_address = \"\"\n"}}
+      fail: {files: {/etc/containerd/config.toml: "[grpc]\n  tcp_address = \"0.0.0.0:10010\"\n"}}
+
+  - id: containerd:config-perms
+    title: containerd configuration is writable by non-root users
+    description: /etc/containerd/config.toml selects runtimes and plugins for a root daemon; a writable config is a path to root.
+    severity: high
+    applies_if: {file: /etc/containerd/config.toml}
+    probe: {type: file, path: /etc/containerd/config.toml}
+    expect: ["mode bits_none 0022", "uid eq 0"]
+    remediation: Make the file root-owned and writable only by root.
+    fix: "chown root:root /etc/containerd/config.toml && chmod 644 /etc/containerd/config.toml"
+    tests:
+      pass: {files: {/etc/containerd/config.toml: "version = 2\n"}, meta: {/etc/containerd/config.toml: "0644 0 0"}}
+      fail: {files: {/etc/containerd/config.toml: "version = 2\n"}, meta: {/etc/containerd/config.toml: "0666 0 0"}}
+
+  - id: crio:socket-perms
+    title: CRI-O socket is writable by non-root users
+    description: crio.sock is the Kubernetes container runtime API; write access means control of every pod on the node.
+    severity: critical
+    applies_if: {file: [/var/run/crio/crio.sock, /run/crio/crio.sock]}
+    probe: {type: file, path: [/var/run/crio/crio.sock, /run/crio/crio.sock]}
+    expect: ["mode bits_none 0002", "mode bits_none 0020 || gid eq 0"]
+    remediation: Restore root:root 0660 on the CRI-O socket.
+    references: [https://github.com/cri-o/cri-o/blob/main/docs/crio.conf.5.md]
+    tests:
+      pass: {files: {/run/crio/crio.sock: ""}, meta: {/run/crio/crio.sock: "s0660 0 0"}}
+      fail: {files: {/run/crio/crio.sock: ""}, meta: {/run/crio/crio.sock: "s0777 0 0"}}

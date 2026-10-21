@@ -1,0 +1,203 @@
+pack: kubernetes
+title: Kubernetes node (kubelet and control-plane files)
+description: kubelet configuration file (/var/lib/kubelet/config.yaml, KubeletConfiguration v1beta1 defaults) and permissions of kubeconfig files, PKI keys and static pod manifests on kubeadm-style nodes.
+category: config
+applies_if:
+  any:
+    - file: [/var/lib/kubelet/config.yaml, /etc/kubernetes]
+    - binary: kubelet
+references:
+  - https://kubernetes.io/docs/reference/config-api/kubelet-config.v1beta1/
+  - https://www.cisecurity.org/benchmark/kubernetes
+test_base:
+  files:
+    /usr/bin/kubelet: ""
+checks:
+  - id: k8s:kubelet-anonymous-auth
+    title: kubelet accepts anonymous requests
+    description: With authentication.anonymous.enabled the kubelet API (10250) serves unauthenticated requests; combined with a permissive authorizer that means remote command execution in every pod.
+    severity: critical
+    level: basic
+    tags: [cis-k8s-4.2.1]
+    probe: {type: config, format: yaml, path: /var/lib/kubelet/config.yaml, key: authentication.anonymous.enabled, default: "false"}
+    expect: [value eq false]
+    remediation: "Set authentication.anonymous.enabled: false in the kubelet config and restart kubelet."
+    fix: "systemctl restart kubelet"
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "apiVersion: kubelet.config.k8s.io/v1beta1\nkind: KubeletConfiguration\nauthentication:\n  anonymous:\n    enabled: false\n"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "authentication:\n  anonymous:\n    enabled: true\n"}}
+      na: {files: {/usr/bin/kubelet: "!absent"}}
+
+  - id: k8s:kubelet-authz-always-allow
+    title: kubelet authorization mode is AlwaysAllow
+    description: authorization.mode AlwaysAllow lets every authenticated (or anonymous) caller exec into pods and read secrets through the kubelet API.
+    severity: critical
+    level: basic
+    tags: [cis-k8s-4.2.2]
+    probe: {type: config, format: yaml, path: /var/lib/kubelet/config.yaml, key: authorization.mode, default: Webhook}
+    expect: [value ne AlwaysAllow]
+    remediation: "Set authorization.mode: Webhook in the kubelet config."
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "authorization:\n  mode: Webhook\n"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "authorization:\n  mode: AlwaysAllow\n"}}
+
+  - id: k8s:kubelet-webhook-authn
+    title: kubelet webhook token authentication is disabled
+    description: Without webhook authentication the kubelet cannot validate service-account tokens and falls back to client certificates or anonymous access.
+    severity: medium
+    tags: [cis-k8s-4.2.2]
+    probe: {type: config, format: yaml, path: /var/lib/kubelet/config.yaml, key: authentication.webhook.enabled, default: "true"}
+    expect: [value eq true]
+    remediation: "Set authentication.webhook.enabled: true."
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "authentication:\n  webhook:\n    enabled: true\n"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "authentication:\n  webhook:\n    enabled: false\n"}}
+
+  - id: k8s:kubelet-client-ca
+    title: kubelet has no client CA for certificate authentication
+    description: authentication.x509.clientCAFile is unset, so the kubelet cannot verify client certificates from the API server.
+    severity: medium
+    tags: [cis-k8s-4.2.3]
+    probe: {type: config, format: yaml, path: /var/lib/kubelet/config.yaml, key: authentication.x509.clientCAFile, default: ""}
+    expect: [value not_empty]
+    remediation: "Set authentication.x509.clientCAFile: /etc/kubernetes/pki/ca.crt."
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "authentication:\n  x509:\n    clientCAFile: /etc/kubernetes/pki/ca.crt\n"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "kind: KubeletConfiguration\n"}}
+
+  - id: k8s:kubelet-read-only-port
+    title: kubelet read-only port is enabled
+    description: readOnlyPort (usually 10255) serves pod specs, environment and metrics without any authentication.
+    severity: high
+    tags: [cis-k8s-4.2.4]
+    probe: {type: config, format: yaml, path: /var/lib/kubelet/config.yaml, key: readOnlyPort, default: "0"}
+    expect: [value eq 0]
+    remediation: "Set readOnlyPort: 0."
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "readOnlyPort: 0\n"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "readOnlyPort: 10255\n"}}
+
+  - id: k8s:kubelet-protect-kernel-defaults
+    title: kubelet does not protect kernel defaults
+    description: protectKernelDefaults makes the kubelet fail instead of silently changing kernel tunables that differ from its expectations.
+    severity: low
+    level: strict
+    tags: [cis-k8s-4.2.6]
+    probe: {type: config, format: yaml, path: /var/lib/kubelet/config.yaml, key: protectKernelDefaults, default: "false"}
+    expect: [value eq true]
+    remediation: "Set protectKernelDefaults: true after setting the required sysctls."
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "protectKernelDefaults: true\n"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "kind: KubeletConfiguration\n"}}
+
+  - id: k8s:kubelet-rotate-certificates
+    title: kubelet client certificate rotation is off
+    description: Without rotateCertificates the kubelet client certificate expires and is typically replaced by hand with long-lived credentials.
+    severity: low
+    tags: [cis-k8s-4.2.11]
+    probe: {type: config, format: yaml, path: /var/lib/kubelet/config.yaml, key: rotateCertificates, default: "false"}
+    expect: [value eq true]
+    remediation: "Set rotateCertificates: true."
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "rotateCertificates: true\n"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "rotateCertificates: false\n"}}
+
+  - id: k8s:kubelet-iptables-chains
+    title: kubelet does not manage iptables utility chains
+    description: makeIPTablesUtilChains false leaves pod networking rules to manual configuration, which commonly drifts out of sync.
+    severity: low
+    level: strict
+    tags: [cis-k8s-4.2.7]
+    probe: {type: config, format: yaml, path: /var/lib/kubelet/config.yaml, key: makeIPTablesUtilChains, default: "true"}
+    expect: [value eq true]
+    remediation: "Remove makeIPTablesUtilChains: false from the kubelet config."
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "kind: KubeletConfiguration\n"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "makeIPTablesUtilChains: false\n"}}
+
+  - id: k8s:kubelet-config-perms
+    title: kubelet config file is writable by non-root users
+    description: The kubelet runs as root; whoever edits its config can disable authentication or authorization.
+    severity: high
+    tags: [cis-k8s-4.1.9]
+    probe: {type: file, path: /var/lib/kubelet/config.yaml}
+    expect: ["mode bits_none 0022", "uid eq 0"]
+    remediation: Restrict the kubelet config to root.
+    fix: "chown root:root /var/lib/kubelet/config.yaml && chmod 600 /var/lib/kubelet/config.yaml"
+    tests:
+      pass: {files: {/var/lib/kubelet/config.yaml: "kind: KubeletConfiguration\n"}, meta: {/var/lib/kubelet/config.yaml: "0600 0 0"}}
+      fail: {files: {/var/lib/kubelet/config.yaml: "kind: KubeletConfiguration\n"}, meta: {/var/lib/kubelet/config.yaml: "0666 0 0"}}
+
+  - id: k8s:admin-kubeconfig-perms
+    title: Cluster-admin kubeconfig {path} is readable by other users
+    description: admin.conf / super-admin.conf hold cluster-admin client credentials; any local user who reads them owns the whole cluster.
+    severity: critical
+    level: basic
+    tags: [cis-k8s-1.1.13]
+    probe: {type: file, path: [/etc/kubernetes/admin.conf, /etc/kubernetes/super-admin.conf]}
+    expect: ["mode bits_none 0044"]
+    remediation: Restrict the file to root (0600).
+    fix: "chown root:root {path} && chmod 600 {path}"
+    tests:
+      pass: {files: {/etc/kubernetes/admin.conf: "apiVersion: v1\n"}, meta: {/etc/kubernetes/admin.conf: "0600 0 0"}}
+      fail: {files: {/etc/kubernetes/admin.conf: "apiVersion: v1\n"}, meta: {/etc/kubernetes/admin.conf: "0644 0 0"}}
+
+  - id: k8s:component-kubeconfig-perms
+    title: Component kubeconfig {path} is more permissive than 0600
+    description: kubelet.conf, controller-manager.conf and scheduler.conf contain client credentials for privileged control-plane identities.
+    severity: medium
+    tags: [cis-k8s-1.1.15, cis-k8s-4.1.5]
+    probe: {type: file, path: [/etc/kubernetes/kubelet.conf, /etc/kubernetes/controller-manager.conf, /etc/kubernetes/scheduler.conf]}
+    expect: ["mode perm_max 0600"]
+    severity_if:
+      - {when: mode bits_any 0004, severity: high}
+    remediation: Restrict the file to root (0600).
+    fix: "chown root:root {path} && chmod 600 {path}"
+    tests:
+      pass: {files: {/etc/kubernetes/kubelet.conf: "apiVersion: v1\n"}, meta: {/etc/kubernetes/kubelet.conf: "0600 0 0"}}
+      fail:
+        - {files: {/etc/kubernetes/kubelet.conf: "apiVersion: v1\n"}, meta: {/etc/kubernetes/kubelet.conf: "0640 0 0"}}
+        - {files: {/etc/kubernetes/scheduler.conf: "apiVersion: v1\n"}, meta: {/etc/kubernetes/scheduler.conf: "0644 0 0"}, severity: high}
+
+  - id: k8s:pki-key-perms
+    title: Kubernetes private key {path} is readable by other users
+    description: Keys under /etc/kubernetes/pki (CA, service-account signing, etcd) allow minting cluster credentials; they must be 0600.
+    severity: high
+    tags: [cis-k8s-1.1.21]
+    probe: {type: file, path: [/etc/kubernetes/pki/*.key, /etc/kubernetes/pki/etcd/*.key]}
+    expect: ["mode perm_max 0600"]
+    severity_if:
+      - {when: mode bits_any 0004, severity: critical}
+    remediation: Restrict PKI keys to root.
+    fix: "chmod 600 {path} && chown root:root {path}"
+    tests:
+      pass: {files: {/etc/kubernetes/pki/ca.key: "k"}, meta: {/etc/kubernetes/pki/ca.key: "0600 0 0"}}
+      fail:
+        - {files: {/etc/kubernetes/pki/sa.key: "k"}, meta: {/etc/kubernetes/pki/sa.key: "0640 0 0"}}
+        - {files: {/etc/kubernetes/pki/ca.key: "k"}, meta: {/etc/kubernetes/pki/ca.key: "0644 0 0"}, severity: critical}
+
+  - id: k8s:manifest-perms
+    title: Static pod manifest {path} is writable by non-root users
+    description: The kubelet runs every file in /etc/kubernetes/manifests as a static pod; a writable manifest lets a user run a privileged pod on the node.
+    severity: critical
+    tags: [cis-k8s-1.1.1]
+    probe: {type: file, path: [/etc/kubernetes/manifests/*.yaml, /etc/kubernetes/manifests/*.yml]}
+    expect: ["mode bits_none 0022", "uid eq 0"]
+    remediation: Make manifests root-owned and 0600.
+    fix: "chown root:root {path} && chmod 600 {path}"
+    tests:
+      pass: {files: {/etc/kubernetes/manifests/kube-apiserver.yaml: "kind: Pod\n"}, meta: {/etc/kubernetes/manifests/kube-apiserver.yaml: "0600 0 0"}}
+      fail: {files: {/etc/kubernetes/manifests/etcd.yaml: "kind: Pod\n"}, meta: {/etc/kubernetes/manifests/etcd.yaml: "0664 0 1000"}}
+
+  - id: k8s:etcd-data-perms
+    title: etcd data directory is accessible to other users
+    description: /var/lib/etcd contains every Kubernetes Secret (unencrypted unless encryption at rest is configured).
+    severity: high
+    tags: [cis-k8s-1.1.11]
+    probe: {type: file, path: /var/lib/etcd}
+    expect: ["mode perm_max 0700"]
+    remediation: Restrict the etcd data dir to its owner.
+    fix: "chmod 700 /var/lib/etcd"
+    tests:
+      pass: {meta: {/var/lib/etcd: "d0700 0 0"}}
+      fail: {meta: {/var/lib/etcd: "d0755 0 0"}}

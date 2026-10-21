@@ -1,0 +1,337 @@
+pack: docker
+title: Docker Engine daemon and running containers
+description: dockerd configuration (/etc/docker/daemon.json, unit files, API exposure) and the security-relevant runtime settings of running containers, read with `docker ps -q` + `docker inspect` (read-only).
+category: config
+applies_if:
+  any:
+    - binary: [docker, dockerd]
+    - file: /etc/docker/daemon.json
+references:
+  - https://docs.docker.com/engine/security/
+  - https://www.cisecurity.org/benchmark/docker
+test_base:
+  files:
+    /usr/bin/docker: ""
+    /usr/bin/dockerd: ""
+    /var/run/docker.sock: ""
+  cmds:
+    docker ps -q: "abc\n"
+checks:
+  # ---- daemon --------------------------------------------------------------
+  - id: docker:api-exposed
+    title: Docker API listening on a network address ({_loc})
+    description: Anyone who can reach the Docker API controls the host (start a privileged container mounting /). Port 2375 is the plaintext, unauthenticated convention; 2376 should only be used with --tlsverify and client certificates.
+    severity: high
+    level: basic
+    probe: {type: listener, process: "^dockerd$"}
+    expect: [loopback eq true]
+    severity_if:
+      - {when: port eq 2375, severity: critical}
+    remediation: Remove tcp:// entries from daemon.json "hosts" and from -H flags in the docker unit, or bind to 127.0.0.1 and require TLS client certificates (tlsverify). Prefer SSH (DOCKER_HOST=ssh://) for remote access.
+    fix: "grep -rn 'tcp://' /etc/docker/daemon.json /etc/systemd/system/docker.service.d/ /lib/systemd/system/docker.service; systemctl daemon-reload && systemctl restart docker"
+    references: [https://docs.docker.com/engine/security/protect-access/]
+    tests:
+      pass: {cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 127.0.0.1:2375 0.0.0.0:* users:(("dockerd",pid=812,fd=9))'}}
+      fail:
+        - {cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 0.0.0.0:2375 0.0.0.0:* users:(("dockerd",pid=812,fd=9))'}, severity: critical}
+        - {cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 *:2376 *:* users:(("dockerd",pid=812,fd=9))'}, severity: high}
+      skip: {cmds: {}}
+
+  - id: docker:tls-not-verified
+    title: Docker daemon accepts TCP connections without client-certificate verification
+    description: daemon.json "hosts" contains a tcp:// socket but "tlsverify" is not true, so any client that can connect gets root-equivalent control of the host.
+    severity: critical
+    level: basic
+    probe: {type: config, format: json, path: /etc/docker/daemon.json, key: tlsverify, keys: [hosts], default: "false"}
+    where: ["hosts regex tcp://"]
+    expect: [value eq true]
+    remediation: Set "tlsverify" true with tlscacert/tlscert/tlskey, or remove the tcp:// host.
+    fix: 'edit /etc/docker/daemon.json: "tlsverify": true, "tlscacert": "/etc/docker/ca.pem", "tlscert": ..., "tlskey": ...; systemctl restart docker'
+    references: [https://docs.docker.com/engine/security/protect-access/#use-tls-https-to-protect-the-docker-daemon-socket]
+    tests:
+      pass:
+        - {files: {/etc/docker/daemon.json: '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"], "tlsverify": true}'}}
+        - {files: {/etc/docker/daemon.json: '{"live-restore": true}'}}
+      fail: {files: {/etc/docker/daemon.json: '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2375"]}'}}
+
+  - id: docker:insecure-registries
+    title: Docker trusts insecure (plain HTTP / unverified TLS) registries
+    description: Images pulled from an insecure registry can be swapped in transit, giving an attacker code execution in every container started from them.
+    severity: medium
+    probe: {type: config, format: json, path: /etc/docker/daemon.json, key: insecure-registries, default: ""}
+    expect: [value empty]
+    remediation: Serve the registry over TLS with a trusted certificate and remove it from "insecure-registries".
+    fix: 'remove "insecure-registries" from /etc/docker/daemon.json; systemctl restart docker'
+    references: [https://docs.docker.com/reference/cli/dockerd/#insecure-registries]
+    tests:
+      pass: {files: {/etc/docker/daemon.json: '{"live-restore": true}'}}
+      fail: {files: {/etc/docker/daemon.json: '{"insecure-registries": ["registry.lan:5000"]}'}}
+
+  - id: docker:live-restore
+    title: Docker live-restore is disabled
+    description: Without live-restore every daemon restart or upgrade stops all containers, which discourages timely Docker security updates.
+    severity: low
+    level: strict
+    tags: [cis-docker-2.15]
+    probe: {type: config, format: json, path: /etc/docker/daemon.json, key: live-restore, default: "false"}
+    expect: [value eq true]
+    missing: fail
+    missing_evidence: /etc/docker/daemon.json absent (live-restore defaults to false)
+    remediation: Enable live-restore (not supported with Swarm mode).
+    fix: 'add "live-restore": true to /etc/docker/daemon.json; systemctl reload docker'
+    references: [https://docs.docker.com/engine/daemon/live-restore/]
+    tests:
+      pass: {files: {/etc/docker/daemon.json: '{"live-restore": true}'}}
+      fail:
+        - {files: {/etc/docker/daemon.json: '{"log-driver": "journald"}'}}
+        - {files: {}}
+
+  - id: docker:icc
+    title: Inter-container communication allowed on the default bridge
+    description: With icc enabled (default) every container on docker0 can reach every other container's ports, so one compromised container can attack the rest.
+    severity: low
+    level: strict
+    tags: [cis-docker-2.1]
+    probe: {type: config, format: json, path: /etc/docker/daemon.json, key: icc, default: "true"}
+    expect: [value eq false]
+    remediation: Set "icc" false and connect containers that must talk through user-defined networks.
+    fix: 'add "icc": false to /etc/docker/daemon.json; systemctl restart docker'
+    references: [https://docs.docker.com/engine/network/drivers/bridge/]
+    tests:
+      pass: {files: {/etc/docker/daemon.json: '{"icc": false}'}}
+      fail: {files: {/etc/docker/daemon.json: '{"live-restore": true}'}}
+
+  - id: docker:userns-remap
+    title: Docker user-namespace remapping is not enabled
+    description: Without userns-remap, root in a container is root on the host; a container escape lands with full privileges.
+    severity: low
+    level: strict
+    tags: [cis-docker-2.10]
+    probe: {type: config, format: json, path: /etc/docker/daemon.json, key: userns-remap, default: ""}
+    expect: [value not_empty]
+    remediation: Enable user-namespace remapping after testing that bind-mounted volumes still work.
+    fix: 'add "userns-remap": "default" to /etc/docker/daemon.json; systemctl restart docker'
+    references: [https://docs.docker.com/engine/security/userns-remap/]
+    tests:
+      pass: {files: {/etc/docker/daemon.json: '{"userns-remap": "default"}'}}
+      fail: {files: {/etc/docker/daemon.json: '{}'}}
+
+  - id: docker:no-new-privileges
+    title: Containers may gain new privileges by default
+    description: Without the daemon-wide no-new-privileges default, setuid binaries inside a container can raise privileges after a compromise.
+    severity: low
+    level: strict
+    tags: [cis-docker-2.18]
+    probe: {type: config, format: json, path: /etc/docker/daemon.json, key: no-new-privileges, default: "false"}
+    expect: [value eq true]
+    remediation: Make no-new-privileges the default for new containers.
+    fix: 'add "no-new-privileges": true to /etc/docker/daemon.json; systemctl restart docker'
+    references: [https://docs.docker.com/reference/cli/dockerd/#daemon-configuration-file]
+    tests:
+      pass: {files: {/etc/docker/daemon.json: '{"no-new-privileges": true}'}}
+      fail: {files: {/etc/docker/daemon.json: '{"icc": false}'}}
+
+  - id: docker:log-rotation
+    title: Container logs (json-file) are not rotated
+    description: The default json-file log driver keeps logs forever; a chatty or attacker-driven container can fill /var/lib/docker and take the host down.
+    severity: low
+    probe: {type: config, format: json, path: /etc/docker/daemon.json, key: log-driver, keys: [log-opts.max-size], default: json-file}
+    expect: ["value not_in json-file || log-opts.max-size not_empty"]
+    missing: fail
+    missing_evidence: /etc/docker/daemon.json absent (json-file logs without max-size)
+    remediation: Set a max-size (and max-file) for json-file, or use the local/journald driver.
+    fix: 'add "log-driver": "local" or "log-opts": {"max-size": "50m", "max-file": "3"} to /etc/docker/daemon.json; systemctl restart docker (applies to new containers)'
+    references: [https://docs.docker.com/engine/logging/drivers/json-file/]
+    tests:
+      pass:
+        - {files: {/etc/docker/daemon.json: '{"log-opts": {"max-size": "50m"}}'}}
+        - {files: {/etc/docker/daemon.json: '{"log-driver": "journald"}'}}
+      fail:
+        - {files: {/etc/docker/daemon.json: '{"live-restore": true}'}}
+        - {files: {}}
+
+  - id: docker:daemon-json-perms
+    title: /etc/docker/daemon.json is writable by non-root users
+    description: daemon.json controls dockerd (running as root); whoever can edit it can expose the API or add runtimes and become root.
+    severity: high
+    tags: [cis-docker-3.17]
+    probe: {type: file, path: /etc/docker/daemon.json}
+    expect: ["mode bits_none 0022", "uid eq 0"]
+    remediation: Make daemon.json root-owned and writable only by root.
+    fix: "chown root:root /etc/docker/daemon.json && chmod 644 /etc/docker/daemon.json"
+    tests:
+      pass: {files: {/etc/docker/daemon.json: "{}"}, meta: {/etc/docker/daemon.json: "0644 0 0"}}
+      fail: {files: {/etc/docker/daemon.json: "{}"}, meta: {/etc/docker/daemon.json: "0666 0 0"}}
+
+  - id: docker:unit-file-perms
+    title: Docker systemd unit or drop-in is writable by non-root users
+    description: The docker.service / docker.socket units decide how dockerd (root) starts; a writable unit or drop-in is a direct path to root.
+    severity: high
+    tags: [cis-docker-3.1]
+    probe:
+      type: file
+      path: [/etc/systemd/system/docker.service, /etc/systemd/system/docker.socket, /etc/systemd/system/docker.service.d/*.conf, /usr/lib/systemd/system/docker.service, /lib/systemd/system/docker.service, /usr/lib/systemd/system/docker.socket, /lib/systemd/system/docker.socket]
+    expect: ["mode bits_none 0022", "uid eq 0"]
+    remediation: Make Docker unit files root-owned and not group/world-writable.
+    fix: "chown root:root {path} && chmod 644 {path}"
+    tests:
+      pass: {files: {/usr/lib/systemd/system/docker.service: "[Service]\n"}, meta: {/usr/lib/systemd/system/docker.service: "0644 0 0"}}
+      fail: {files: {/etc/systemd/system/docker.service.d/override.conf: "[Service]\n"}, meta: {/etc/systemd/system/docker.service.d/override.conf: "0664 1000 1000"}}
+
+  - id: docker:data-root-perms
+    title: Docker data root is accessible to other users
+    description: /var/lib/docker holds container filesystems, volumes and secrets; it should be root-only (0710 or stricter).
+    severity: medium
+    level: strict
+    probe: {type: file, path: /var/lib/docker}
+    expect: ["mode bits_none 0026", "uid eq 0"]
+    remediation: Restrict the Docker data root to root.
+    fix: "chown root:root /var/lib/docker && chmod 710 /var/lib/docker"
+    tests:
+      pass: {meta: {/var/lib/docker: "d0710 0 0"}}
+      fail: {meta: {/var/lib/docker: "d0755 0 0"}}
+
+  # ---- running containers --------------------------------------------------
+  - id: docker:container-privileged
+    title: Container {name} runs privileged
+    description: --privileged gives the container all capabilities and every host device; escaping to the host is trivial.
+    severity: high
+    level: basic
+    tags: [cis-docker-5.5]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: [privileged eq false]
+    remediation: Drop --privileged; grant only the specific capabilities or devices the workload needs (--cap-add, --device).
+    fix: "docker inspect {name} --format '{{.HostConfig.Privileged}}'; recreate without privileged: true in the compose file"
+    references: [https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities]
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{"Image":"nginx:1.27","User":"101"},"HostConfig":{"Privileged":false,"NetworkMode":"bridge","Memory":536870912},"Mounts":[]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{"Image":"nginx:1.27"},"HostConfig":{"Privileged":true,"NetworkMode":"bridge"},"Mounts":[]}]'}}
+      na: {files: {/var/run/docker.sock: "!absent"}}
+      skip: {cmds: {docker ps -q: "!fail"}}
+
+  - id: docker:container-socket-mount
+    title: Container {name} has the container runtime socket mounted
+    description: A container with docker.sock (or containerd/podman sockets) mounted can start privileged containers on the host - compromise of the app is compromise of the host.
+    severity: critical
+    level: basic
+    tags: [cis-docker-5.32]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: [docker_sock eq false]
+    remediation: Remove the socket bind mount. If the container really needs Docker (CI runners, Traefik), use a socket proxy that allows only read-only endpoints, or rootless Docker.
+    references: [https://docs.docker.com/engine/security/#docker-daemon-attack-surface]
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{"Image":"nginx"},"HostConfig":{},"Mounts":[{"Source":"/srv/web","Destination":"/usr/share/nginx/html"}]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/traefik","Config":{"Image":"traefik:3"},"HostConfig":{},"Mounts":[{"Source":"/var/run/docker.sock","Destination":"/var/run/docker.sock"}]}]'}}
+
+  - id: docker:container-host-pid
+    title: Container {name} shares the host PID namespace
+    description: --pid=host lets the container see and signal every host process and, with ptrace capabilities, read their memory.
+    severity: high
+    tags: [cis-docker-5.16]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: [pid_mode ne host]
+    remediation: "Remove pid: host unless the container is a host-monitoring agent you trust."
+    references: [https://docs.docker.com/engine/containers/run/#pid-settings---pid]
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"PidMode":""},"Mounts":[]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/agent","Config":{},"HostConfig":{"PidMode":"host"},"Mounts":[]}]'}}
+
+  - id: docker:container-host-network
+    title: Container {name} uses the host network namespace
+    description: --network=host bypasses Docker network isolation; the container can bind any host port and reach services that listen only on localhost.
+    severity: medium
+    tags: [cis-docker-5.10]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: [network_mode ne host]
+    remediation: Use bridge or user-defined networks and publish only the ports needed.
+    references: [https://docs.docker.com/engine/network/drivers/host/]
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"NetworkMode":"bridge"},"Mounts":[]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"NetworkMode":"host"},"Mounts":[]}]'}}
+
+  - id: docker:container-host-ipc
+    title: Container {name} shares the host IPC namespace
+    description: --ipc=host exposes host shared memory segments and semaphores to the container.
+    severity: medium
+    tags: [cis-docker-5.17]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: [ipc_mode ne host]
+    remediation: "Remove ipc: host."
+    references: [https://docs.docker.com/engine/containers/run/#ipc-settings---ipc]
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"IpcMode":"private"},"Mounts":[]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"IpcMode":"host"},"Mounts":[]}]'}}
+
+  - id: docker:container-sensitive-mount
+    title: Container {name} bind-mounts a sensitive host directory
+    description: Mounting /, /etc, /root, /boot, /proc, /sys, /dev, /run or /var/lib/docker from the host lets the container read secrets or change host configuration.
+    severity: high
+    tags: [cis-docker-5.6]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: [sensitive_mounts empty]
+    remediation: Mount only the specific files or subdirectories the container needs, read-only where possible (:ro).
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{},"Mounts":[{"Source":"/etc/nginx/conf.d","Destination":"/etc/nginx/conf.d"}]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/backup","Config":{},"HostConfig":{},"Mounts":[{"Source":"/","Destination":"/host"}]}]'}}
+
+  - id: docker:container-dangerous-caps
+    title: Container {name} adds dangerous capabilities ({cap_add})
+    description: CAP_SYS_ADMIN, SYS_MODULE, SYS_PTRACE, DAC_READ_SEARCH, SYS_RAWIO, BPF or ALL each allow known container escapes.
+    severity: high
+    tags: [cis-docker-5.4]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: ["cap_add has_none all,sys_admin,cap_sys_admin,sys_module,cap_sys_module,sys_ptrace,cap_sys_ptrace,dac_read_search,cap_dac_read_search,sys_rawio,cap_sys_rawio,bpf,cap_bpf"]
+    remediation: Remove the capability from cap_add; most workloads need none beyond Docker's default set.
+    references: [https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities]
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/vpn","Config":{},"HostConfig":{"CapAdd":["NET_ADMIN"]},"Mounts":[]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/x","Config":{},"HostConfig":{"CapAdd":["SYS_ADMIN"]},"Mounts":[]}]'}}
+
+  - id: docker:container-unconfined
+    title: Container {name} runs with seccomp/AppArmor/SELinux confinement disabled
+    description: security-opt seccomp=unconfined, apparmor=unconfined or label=disable removes the kernel-level filters that block most container escape techniques.
+    severity: medium
+    tags: [cis-docker-5.21]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: ["security_opt not_regex (?i)(seccomp[=:]unconfined|apparmor[=:]unconfined|label[=:]disable)"]
+    remediation: Remove the unconfined security option; write a custom profile if the default is too strict.
+    references: [https://docs.docker.com/engine/security/seccomp/]
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"SecurityOpt":["no-new-privileges:true"]},"Mounts":[]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"SecurityOpt":["seccomp=unconfined"]},"Mounts":[]}]'}}
+
+  - id: docker:container-root-user
+    title: Container {name} runs as root
+    description: The process inside runs as uid 0; without user-namespace remapping a container escape gives host root.
+    severity: low
+    level: strict
+    tags: [cis-docker-4.1]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: ["user not_in root,0,0:0"]
+    remediation: Set USER in the image or user in the compose file to an unprivileged uid.
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{"User":"101"},"HostConfig":{},"Mounts":[]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{"User":""},"HostConfig":{},"Mounts":[]}]'}}
+
+  - id: docker:container-no-memory-limit
+    title: Container {name} has no memory limit
+    description: A container without a memory limit can exhaust host memory (leak or attack) and trigger the OOM killer on host services.
+    severity: low
+    level: strict
+    tags: [cis-docker-5.11]
+    applies_if: {file: [/var/run/docker.sock, /run/docker.sock]}
+    probe: {type: container, runtime: docker}
+    expect: [memory_limit ne 0]
+    remediation: Set mem_limit / --memory for the container.
+    tests:
+      pass: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"Memory":536870912},"Mounts":[]}]'}}
+      fail: {cmds: {docker inspect abc: '[{"Name":"/web","Config":{},"HostConfig":{"Memory":0},"Mounts":[]}]'}}

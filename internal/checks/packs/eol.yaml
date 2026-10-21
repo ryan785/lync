@@ -1,0 +1,51 @@
+pack: eol
+title: End-of-life language runtimes (installed packages)
+description: Installed runtime packages whose upstream (and distribution) security support has ended. Operating-system EOL is reported by the eol rule; PHP branches by php:eol-branch; running processes by runtime:eol-node / runtime:eol-python.
+category: eol
+references:
+  - https://endoflife.date/
+test_base:
+  packages:
+    bash: 5.1.8-9.el9
+checks:
+  - id: eol:python2
+    title: Python 2 is installed ({name} {upstream})
+    description: Python 2.7 reached end of life in January 2020 and has been dropped or retired by every major distribution (RHEL 8's python27 stream retired June 2024); it no longer receives security fixes.
+    severity: medium
+    probe: {type: package, name: [python2, python2.7, python27, python, python2-minimal, python2.7-minimal]}
+    where: [upstream version_lt 3]
+    expect_none: true
+    remediation: Port remaining scripts to Python 3 and remove the Python 2 packages.
+    fix: "dnf remove python2 (RHEL) / apt purge python2 python2.7 (Debian/Ubuntu)"
+    references: [https://www.python.org/doc/sunset-python-2/, https://access.redhat.com/support/policy/updates/rhel-app-streams-life-cycle]
+    tests:
+      pass: {packages: {python3: 3.9.18-3.el9}}
+      fail: {packages: {python2: 2.7.18-17.module+el8.9.0+1612+1d3f3b6b}}
+      skip: {packages: {bash: "!absent"}}
+
+  - id: eol:java-legacy
+    title: End-of-life Java runtime installed ({name})
+    description: Java 6 and 7 (OpenJDK and Oracle) stopped receiving public security updates years ago and carry many remotely exploitable deserialisation and sandbox-escape CVEs.
+    severity: high
+    probe: {type: package, name: ["java-1.6.0-openjdk*", "java-1.7.0-openjdk*", "openjdk-6-*", "openjdk-7-*", "jdk1.6*", "jdk1.7*", "jre1.6*", "jre1.7*"]}
+    expect_none: true
+    remediation: Move applications to a supported Java LTS (17 or 21) and remove the old runtime.
+    references: [https://endoflife.date/oracle-jdk, https://access.redhat.com/articles/1299013]
+    tests:
+      pass: {packages: {java-17-openjdk-headless: 17.0.12.0.7-2.el9}}
+      fail: {packages: {java-1.7.0-openjdk-headless: 1:1.7.0.261-2.6.22.2.el7_8}}
+
+  - id: eol:nodejs-package
+    title: Node.js {upstream} package is past upstream end-of-life
+    description: Node.js majors below 22 are out of upstream support (Node 20 ended 2026-04-30); Red Hat retires its nodejs application streams on the same dates, so no further security fixes ship.
+    severity: medium
+    applies_if: {not: {os: debian}}
+    probe: {type: package, name: [nodejs]}
+    where: [upstream version_lt 22]
+    expect_none: true
+    remediation: Upgrade to a supported LTS (dnf module switch-to nodejs:22, or NodeSource / official binaries for 22+).
+    references: [https://nodejs.org/en/about/previous-releases, https://access.redhat.com/support/policy/updates/rhel-app-streams-life-cycle]
+    tests:
+      pass: {packages: {nodejs: 1:22.11.0-1.module+el9.5.0+1+abc}, os: "rocky:9.5"}
+      fail: {packages: {nodejs: 1:18.20.4-1.module+el8.10.0+1+abc}, os: "rocky:8.10"}
+      na: {packages: {nodejs: 18.19.0+dfsg-6~deb12u2}, os: "debian:12"}

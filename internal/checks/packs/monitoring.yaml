@@ -1,0 +1,283 @@
+pack: monitoring
+title: Monitoring agents and dashboards (Zabbix, Prometheus, node_exporter, Grafana, Netdata)
+description: Monitoring agents run with broad privileges and dashboards hold credentials for every data source; misconfigured ones are a common pivot point.
+category: config
+references:
+  - https://www.zabbix.com/documentation/current/en/manual/appendix/config/zabbix_agentd
+checks:
+  # ---- Zabbix --------------------------------------------------------------
+  - id: zabbix:agent-server-any
+    title: Zabbix agent accepts passive checks from any address
+    description: Server=0.0.0.0/0 (or ::/0) lets anyone query the agent - every UserParameter and, if enabled, system.run commands.
+    severity: high
+    applies_if: {file: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agent2.conf]}
+    probe:
+      type: config
+      format: kv
+      path: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agentd.d/*.conf, /etc/zabbix/zabbix_agent2.conf, /etc/zabbix/zabbix_agent2.d/*.conf]
+      key: Server
+      default: ""
+    expect: ['value not_regex (^|,)\s*(0\.0\.0\.0/0|::/0)\s*(,|$)']
+    remediation: List only the Zabbix server/proxy addresses in Server=.
+    references: [https://www.zabbix.com/documentation/current/en/manual/appendix/config/zabbix_agentd]
+    tests:
+      pass: {files: {/etc/zabbix/zabbix_agentd.conf: "Server=192.0.2.10\nServerActive=192.0.2.10\n"}}
+      fail: {files: {/etc/zabbix/zabbix_agentd.conf: "Server=127.0.0.1,0.0.0.0/0\n"}}
+      na: {files: {}}
+
+  - id: zabbix:agent-remote-commands
+    title: Zabbix agent remote commands are enabled
+    description: EnableRemoteCommands=1 lets the Zabbix server (or anyone allowed by Server=) run arbitrary shell commands as the zabbix user via system.run.
+    severity: high
+    applies_if: {file: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agent2.conf]}
+    probe:
+      type: config
+      format: kv
+      path: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agentd.d/*.conf]
+      key: EnableRemoteCommands
+      default: "0"
+    expect: [value eq 0]
+    remediation: Set EnableRemoteCommands=0 (use DenyKey=system.run[*] on newer agents) unless remote commands are required.
+    tests:
+      pass: {files: {/etc/zabbix/zabbix_agentd.conf: "Server=192.0.2.10\n"}}
+      fail: {files: {/etc/zabbix/zabbix_agentd.conf: "Server=192.0.2.10\nEnableRemoteCommands=1\n"}}
+
+  - id: zabbix:agent-allow-system-run
+    title: Zabbix agent allows system.run
+    description: AllowKey=system.run[...] enables remote command execution through the agent (Zabbix 5.0.2+ replacement for EnableRemoteCommands).
+    severity: high
+    applies_if: {file: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agent2.conf]}
+    probe:
+      type: content
+      path: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agentd.d/*.conf, /etc/zabbix/zabbix_agent2.conf, /etc/zabbix/zabbix_agent2.d/*.conf]
+      regex: '^\s*AllowKey\s*=\s*system\.run'
+    expect: [match eq false]
+    remediation: Remove AllowKey=system.run[...] or restrict it to exact command strings.
+    references: [https://www.zabbix.com/documentation/current/en/manual/config/items/restrict_checks]
+    tests:
+      pass: {files: {/etc/zabbix/zabbix_agent2.conf: "DenyKey=system.run[*]\n"}}
+      fail: {files: {/etc/zabbix/zabbix_agent2.conf: "AllowKey=system.run[*]\n"}}
+
+  - id: zabbix:agent-allow-root
+    title: Zabbix agent runs as root (AllowRoot=1)
+    description: AllowRoot=1 keeps zabbix_agentd running as root, so every UserParameter and remote command runs as root.
+    severity: high
+    applies_if: {file: /etc/zabbix/zabbix_agentd.conf}
+    probe:
+      type: config
+      format: kv
+      path: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agentd.d/*.conf]
+      key: AllowRoot
+      default: "0"
+    expect: [value eq 0]
+    remediation: Set AllowRoot=0 (the agent then runs as the zabbix user); grant specific privileged checks through sudo rules.
+    tests:
+      pass: {files: {/etc/zabbix/zabbix_agentd.conf: "AllowRoot=0\n"}}
+      fail: {files: {/etc/zabbix/zabbix_agentd.conf: "AllowRoot=1\n"}}
+
+  - id: zabbix:unsafe-user-parameters
+    title: Zabbix agent allows unsafe UserParameter arguments
+    description: UnsafeUserParameters=1 passes shell metacharacters from the server into UserParameter commands, turning any parameterised key into command injection.
+    severity: medium
+    applies_if: {file: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agent2.conf]}
+    probe:
+      type: config
+      format: kv
+      path: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agentd.d/*.conf, /etc/zabbix/zabbix_agent2.conf, /etc/zabbix/zabbix_agent2.d/*.conf]
+      key: UnsafeUserParameters
+      default: "0"
+    expect: [value eq 0]
+    remediation: Set UnsafeUserParameters=0 and validate parameters inside the scripts.
+    tests:
+      pass: {files: {/etc/zabbix/zabbix_agentd.conf: "UnsafeUserParameters=0\n"}}
+      fail: {files: {/etc/zabbix/zabbix_agentd.conf: "UnsafeUserParameters=1\n"}}
+
+  - id: zabbix:agent-unencrypted
+    title: Zabbix agent accepts unencrypted connections
+    description: TLSAccept=unencrypted (the default) sends monitoring data and passive check requests in clear text and does not authenticate the server.
+    severity: low
+    level: strict
+    applies_if: {file: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agent2.conf]}
+    probe:
+      type: config
+      format: kv
+      path: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agentd.d/*.conf, /etc/zabbix/zabbix_agent2.conf, /etc/zabbix/zabbix_agent2.d/*.conf]
+      key: TLSAccept
+      default: unencrypted
+    expect: [value not_contains unencrypted]
+    remediation: Configure PSK or certificate encryption (TLSAccept=psk, TLSConnect=psk, TLSPSKIdentity, TLSPSKFile).
+    references: [https://www.zabbix.com/documentation/current/en/manual/encryption]
+    tests:
+      pass: {files: {/etc/zabbix/zabbix_agentd.conf: "TLSAccept=psk\nTLSConnect=psk\n"}}
+      fail: {files: {/etc/zabbix/zabbix_agentd.conf: "Server=192.0.2.10\n"}}
+
+  - id: zabbix:agent-config-writable
+    title: Zabbix agent configuration {path} is writable by non-root users
+    description: UserParameter lines are commands the agent runs; a writable agent config lets a local user run code as the zabbix user (or root if the agent runs as root).
+    severity: high
+    applies_if: {file: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agent2.conf]}
+    probe: {type: file, path: [/etc/zabbix/zabbix_agentd.conf, /etc/zabbix/zabbix_agentd.d/*.conf, /etc/zabbix/zabbix_agent2.conf, /etc/zabbix/zabbix_agent2.d/*.conf]}
+    expect: ["mode bits_none 0022", "uid eq 0"]
+    remediation: Make agent configuration root-owned and not group/world-writable.
+    fix: "chown root:root {path} && chmod 644 {path}"
+    tests:
+      pass: {files: {/etc/zabbix/zabbix_agentd.conf: "Server=192.0.2.10\n"}, meta: {/etc/zabbix/zabbix_agentd.conf: "0644 0 0"}}
+      fail: {files: {/etc/zabbix/zabbix_agentd.d/custom.conf: "UserParameter=x,echo 1\n", /etc/zabbix/zabbix_agentd.conf: ""}, meta: {/etc/zabbix/zabbix_agentd.d/custom.conf: "0666 0 0", /etc/zabbix/zabbix_agentd.conf: "0644 0 0"}}
+
+  - id: zabbix:server-config-readable
+    title: Zabbix server/proxy config {path} is readable by other users
+    description: zabbix_server.conf and zabbix_proxy.conf contain the database password (DBPassword) and often PSKs.
+    severity: high
+    applies_if: {file: [/etc/zabbix/zabbix_server.conf, /etc/zabbix/zabbix_proxy.conf]}
+    probe: {type: file, path: [/etc/zabbix/zabbix_server.conf, /etc/zabbix/zabbix_proxy.conf]}
+    expect: ["mode bits_none 0004"]
+    remediation: Restrict the file to root:zabbix 0640.
+    fix: "chown root:zabbix {path} && chmod 640 {path}"
+    tests:
+      pass: {files: {/etc/zabbix/zabbix_server.conf: "DBName=zabbix\n"}, meta: {/etc/zabbix/zabbix_server.conf: "0640 0 995"}}
+      fail: {files: {/etc/zabbix/zabbix_server.conf: "DBName=zabbix\n"}, meta: {/etc/zabbix/zabbix_server.conf: "0644 0 0"}}
+
+  - id: zabbix:frontend-config-readable
+    title: Zabbix frontend config {path} is readable by other users
+    description: zabbix.conf.php contains the frontend's database password in clear text.
+    severity: medium
+    applies_if: {file: [/etc/zabbix/web/zabbix.conf.php, /usr/share/zabbix/conf/zabbix.conf.php]}
+    probe: {type: file, path: [/etc/zabbix/web/zabbix.conf.php, /usr/share/zabbix/conf/zabbix.conf.php]}
+    expect: ["mode bits_none 0004"]
+    remediation: Make the file readable only by root and the web server group (chmod 640).
+    fix: "chmod 640 {path}"
+    tests:
+      pass: {files: {/etc/zabbix/web/zabbix.conf.php: "<?php\n"}, meta: {/etc/zabbix/web/zabbix.conf.php: "0640 0 48"}}
+      fail: {files: {/etc/zabbix/web/zabbix.conf.php: "<?php\n"}, meta: {/etc/zabbix/web/zabbix.conf.php: "0644 48 48"}}
+
+  # ---- Prometheus ----------------------------------------------------------
+  - id: node-exporter:exposed
+    title: node_exporter is reachable on a network address
+    description: node_exporter has no authentication by default and publishes detailed host information (kernel, filesystems, network, systemd units) useful for reconnaissance.
+    severity: low
+    applies_if: {binary: [node_exporter, prometheus-node-exporter]}
+    probe: {type: listener, process: "^(node_exporter|prometheus-node)$"}
+    expect: [loopback eq true]
+    remediation: Bind it to a private/loopback address (--web.listen-address), firewall port 9100 to the Prometheus server, or configure --web.config.file with TLS and basic auth.
+    references: [https://prometheus.io/docs/prometheus/latest/configuration/https/]
+    tests:
+      pass: {files: {/usr/bin/prometheus-node-exporter: ""}, cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 127.0.0.1:9100 0.0.0.0:* users:(("prometheus-node",pid=55,fd=3))'}}
+      fail: {files: {/usr/local/bin/node_exporter: ""}, cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 *:9100 *:* users:(("node_exporter",pid=55,fd=3))'}}
+      na: {files: {}}
+
+  - id: prometheus:exposed
+    title: Prometheus server is reachable on a network address
+    description: Prometheus ships without authentication; anyone who can reach it can query every metric and label (internal hostnames, versions, sometimes secrets in labels).
+    severity: medium
+    applies_if: {binary: prometheus}
+    probe: {type: listener, process: "^prometheus$"}
+    expect: [loopback eq true]
+    remediation: Put Prometheus behind an authenticating reverse proxy, restrict it with the firewall, or set basic auth/TLS via --web.config.file.
+    references: [https://prometheus.io/docs/operating/security/]
+    tests:
+      pass: {files: {/usr/bin/prometheus: ""}, cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 127.0.0.1:9090 0.0.0.0:* users:(("prometheus",pid=60,fd=7))'}}
+      fail: {files: {/usr/bin/prometheus: ""}, cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 0.0.0.0:9090 0.0.0.0:* users:(("prometheus",pid=60,fd=7))'}}
+
+  - id: prometheus:admin-api
+    title: Prometheus admin API is enabled
+    description: --web.enable-admin-api exposes unauthenticated endpoints that delete time series and create snapshots on disk.
+    severity: medium
+    applies_if: {binary: prometheus}
+    probe:
+      type: content
+      path: [/etc/systemd/system/prometheus.service, /etc/systemd/system/prometheus.service.d/*.conf, /usr/lib/systemd/system/prometheus.service, /lib/systemd/system/prometheus.service, /etc/default/prometheus, /etc/sysconfig/prometheus]
+      regex: '--web\.enable-admin-api'
+    expect: [match eq false]
+    remediation: Remove --web.enable-admin-api unless needed, and protect the endpoint with an authenticating proxy.
+    references: [https://prometheus.io/docs/prometheus/latest/querying/api/#tsdb-admin-apis]
+    tests:
+      pass: {files: {/usr/bin/prometheus: "", /etc/default/prometheus: "ARGS=\"--storage.tsdb.retention.time=30d\"\n"}}
+      fail: {files: {/usr/bin/prometheus: "", /etc/default/prometheus: "ARGS=\"--web.enable-admin-api\"\n"}}
+
+  - id: prometheus:lifecycle-api
+    title: Prometheus lifecycle API is enabled
+    description: --web.enable-lifecycle lets any client that reaches Prometheus shut it down or reload its configuration over HTTP.
+    severity: low
+    applies_if: {binary: prometheus}
+    probe:
+      type: content
+      path: [/etc/systemd/system/prometheus.service, /etc/systemd/system/prometheus.service.d/*.conf, /usr/lib/systemd/system/prometheus.service, /lib/systemd/system/prometheus.service, /etc/default/prometheus, /etc/sysconfig/prometheus]
+      regex: '--web\.enable-lifecycle'
+    expect: [match eq false]
+    remediation: Remove --web.enable-lifecycle and reload with SIGHUP (systemctl reload prometheus) instead.
+    references: [https://prometheus.io/docs/prometheus/latest/management_api/]
+    tests:
+      pass: {files: {/usr/bin/prometheus: "", /etc/default/prometheus: "ARGS=\"\"\n"}}
+      fail: {files: {/usr/bin/prometheus: "", /etc/systemd/system/prometheus.service: "[Service]\nExecStart=/usr/bin/prometheus --web.enable-lifecycle\n"}}
+
+  # ---- Grafana -------------------------------------------------------------
+  - id: grafana:anonymous-access
+    title: Grafana anonymous access is enabled
+    description: "[auth.anonymous] enabled = true lets anyone view dashboards (and query data sources) without logging in; with org_role Editor/Admin they can also change them."
+    severity: medium
+    applies_if: {file: /etc/grafana/grafana.ini}
+    probe: {type: config, format: ini, path: /etc/grafana/grafana.ini, section: auth.anonymous, key: enabled, keys: [org_role], default: "false"}
+    expect: [value eq false]
+    severity_if:
+      - {when: "org_role in admin,editor", severity: high}
+    remediation: Set enabled = false in [auth.anonymous] (or share specific dashboards via public dashboards).
+    references: [https://grafana.com/docs/grafana/latest/setup-grafana/configure-security/configure-authentication/#anonymous-authentication]
+    tests:
+      pass: {files: {/etc/grafana/grafana.ini: "[auth.anonymous]\nenabled = false\n"}}
+      fail:
+        - {files: {/etc/grafana/grafana.ini: "[auth.anonymous]\nenabled = true\norg_role = Viewer\n"}}
+        - {files: {/etc/grafana/grafana.ini: "[auth.anonymous]\nenabled = true\norg_role = Admin\n"}, severity: high}
+
+  - id: grafana:allow-sign-up
+    title: Grafana allows users to sign up
+    description: "[users] allow_sign_up = true lets anyone create an account and see dashboards in the default organisation."
+    severity: medium
+    applies_if: {file: /etc/grafana/grafana.ini}
+    probe: {type: config, format: ini, path: /etc/grafana/grafana.ini, section: users, key: allow_sign_up, default: "false"}
+    expect: [value eq false]
+    remediation: Set allow_sign_up = false in [users]; invite users instead.
+    references: [https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/#allow_sign_up]
+    tests:
+      pass: {files: {/etc/grafana/grafana.ini: "[users]\n;allow_sign_up = true\n"}}
+      fail: {files: {/etc/grafana/grafana.ini: "[users]\nallow_sign_up = true\n"}}
+
+  - id: grafana:cookie-secure
+    title: Grafana session cookies are not marked Secure
+    description: Without cookie_secure the session cookie can be sent over plain HTTP and intercepted.
+    severity: low
+    level: strict
+    applies_if: {file: /etc/grafana/grafana.ini}
+    probe: {type: config, format: ini, path: /etc/grafana/grafana.ini, section: security, key: cookie_secure, default: "false"}
+    expect: [value eq true]
+    remediation: Serve Grafana over HTTPS and set cookie_secure = true in [security].
+    references: [https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/#cookie_secure]
+    tests:
+      pass: {files: {/etc/grafana/grafana.ini: "[security]\ncookie_secure = true\n"}}
+      fail: {files: {/etc/grafana/grafana.ini: "[security]\nadmin_user = admin\n"}}
+
+  - id: grafana:config-readable
+    title: grafana.ini is readable by other users
+    description: grafana.ini holds secret_key (encrypts stored data-source passwords), database and SMTP credentials.
+    severity: medium
+    applies_if: {file: /etc/grafana/grafana.ini}
+    probe: {type: file, path: /etc/grafana/grafana.ini}
+    expect: ["mode bits_none 0004"]
+    remediation: Restrict grafana.ini to root:grafana 0640.
+    fix: "chown root:grafana /etc/grafana/grafana.ini && chmod 640 /etc/grafana/grafana.ini"
+    tests:
+      pass: {files: {/etc/grafana/grafana.ini: "[server]\n"}, meta: {/etc/grafana/grafana.ini: "0640 0 472"}}
+      fail: {files: {/etc/grafana/grafana.ini: "[server]\n"}, meta: {/etc/grafana/grafana.ini: "0644 0 0"}}
+
+  # ---- Netdata -------------------------------------------------------------
+  - id: netdata:exposed
+    title: Netdata agent is reachable on a network address
+    description: The Netdata agent API (19999) is unauthenticated and exposes detailed real-time system, process and application metrics.
+    severity: medium
+    applies_if: {any: [{binary: netdata}, {file: /etc/netdata/netdata.conf}]}
+    probe: {type: listener, process: "^netdata$"}
+    expect: [loopback eq true]
+    remediation: Bind Netdata to localhost ([web] bind to = 127.0.0.1) and access it via a proxy with authentication, or restrict with 'allow connections from'.
+    references: [https://learn.netdata.cloud/docs/netdata-agent/securing-netdata-agents/]
+    tests:
+      pass: {files: {/usr/sbin/netdata: ""}, cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 127.0.0.1:19999 0.0.0.0:* users:(("netdata",pid=70,fd=4))'}}
+      fail: {files: {/usr/sbin/netdata: ""}, cmds: {"ss -H -tulnp": 'tcp LISTEN 0 4096 0.0.0.0:19999 0.0.0.0:* users:(("netdata",pid=70,fd=4))'}}

@@ -1,0 +1,91 @@
+pack: suid
+title: SUID/SGID binaries and writable system paths
+description: Set-id programs that hand out root (GTFOBins-style interpreters and tools, set-id files in user-writable trees) and system directories in root's PATH that other users can write to.
+category: filesystem
+references:
+  - https://gtfobins.github.io/#+suid
+checks:
+  - id: suid:dangerous-binary
+    title: Shell, interpreter or file tool {path} is setuid
+    description: A setuid shell, interpreter, editor, pager or file utility (bash, python, perl, find, vim, less, cp, tar, ...) gives every local user a root shell in one command.
+    severity: critical
+    level: basic
+    probe:
+      type: walk
+      roots: [/usr/bin, /usr/sbin, /bin, /sbin, /usr/local/bin, /usr/local/sbin]
+      max_depth: 1
+      file_type: file
+      match: [sh, bash, dash, zsh, ksh, csh, tcsh, fish, busybox, "python*", "perl*", "ruby*", "php*", node, nodejs, "lua*", awk, gawk, mawk, nawk, find, vi, vim, vim.basic, vim.tiny, nano, ed, less, more, man, cp, mv, dd, tee, tar, zip, unzip, rsync, env, xargs, sed, chmod, chown, nmap, gdb, strace, socat, nc, ncat, netcat, wget, curl, openssl, git, make, taskset, nice, docker, systemctl, journalctl, ionice, timeout, stdbuf, script]
+    where: [suid eq true]
+    expect_none: true
+    remediation: Remove the setuid bit; grant specific commands through sudo instead. Check how it was set - this is a common persistence backdoor.
+    fix: "chmod u-s {path}"
+    tests:
+      pass: {files: {/usr/bin/passwd: "", /usr/bin/bash: ""}, meta: {/usr/bin/passwd: "4755 0 0", /usr/bin/bash: "0755 0 0"}}
+      fail: {files: {/usr/bin/find: ""}, meta: {/usr/bin/find: "4755 0 0"}}
+
+  - id: suid:unusual-location
+    title: Set-id program in a user-writable location ({path})
+    description: Setuid/setgid files under /tmp, /var/tmp, /dev/shm, /home, /srv, /opt or /var/www are almost always planted backdoors or leftovers that let users escalate.
+    severity: high
+    probe:
+      type: walk
+      roots: [/tmp, /var/tmp, /dev/shm, /home, /srv, /opt, /var/www]
+      max_depth: 6
+      max_entries: 30000
+      file_type: file
+      prune: [node_modules, .git, .cache, .local, .npm, containers, overlay2, snapshots]
+    where: ["suid eq true || sgid eq true", 'path not_regex /chrome-sandbox$']
+    expect_none: true
+    remediation: Remove the set-id bits (or the file), find out how it got there, and mount these filesystems nosuid where possible.
+    fix: "chmod ug-s {path}"
+    tests:
+      pass: {files: {/opt/app/bin/run: "", /opt/google/chrome/chrome-sandbox: ""}, meta: {/opt/app/bin/run: "0755 0 0", /opt/google/chrome/chrome-sandbox: "4755 0 0"}}
+      fail: {files: {/tmp/.x/sh: ""}, meta: {/tmp/.x/sh: "4755 0 0"}}
+
+  - id: suid:path-dir-writable
+    title: Directory in root's PATH is writable by non-root users ({path})
+    description: Anyone who can write to a directory in root's PATH can plant a binary that root (cron jobs, scripts, admins) runs next.
+    severity: critical
+    level: basic
+    probe: {type: file, path: [/usr/local/sbin, /usr/local/bin, /usr/sbin, /usr/bin, /sbin, /bin]}
+    expect: ["mode bits_none 0002", "uid eq 0", "mode bits_none 0020 || group in root,staff,wheel,bin"]
+    remediation: Make the directory root-owned and not writable by others.
+    fix: "chown root:root {path} && chmod 755 {path}"
+    tests:
+      pass: {meta: {/usr/local/bin: "d0755 0 0", /usr/bin: "d0755 0 0", /usr/local/sbin: "d2775 0 50"}, files: {/etc/group: "root:x:0:\nstaff:x:50:\n"}}
+      fail:
+        - {meta: {/usr/local/bin: "d0775 1000 1000"}}
+        - {meta: {/usr/bin: "d0777 0 0"}}
+
+  - id: suid:system-binary-world-writable
+    title: World-writable program in a system bin directory ({path})
+    description: A world-writable executable in /usr/bin or /usr/sbin can be replaced by any user and will later run as root.
+    severity: critical
+    probe:
+      type: walk
+      roots: [/usr/bin, /usr/sbin, /bin, /sbin]
+      max_depth: 1
+      file_type: file
+      max_entries: 20000
+    where: [world_writable eq true]
+    expect_none: true
+    remediation: Remove world write permission and verify the file against the package (rpm -Vf / debsums).
+    fix: "chmod o-w {path}"
+    tests:
+      pass: {files: {/usr/bin/ls: ""}, meta: {/usr/bin/ls: "0755 0 0"}}
+      fail: {files: {/usr/sbin/backup-helper: ""}, meta: {/usr/sbin/backup-helper: "0777 0 0"}}
+
+  - id: suid:tmp-sticky
+    title: Shared temp directory {path} lacks the sticky bit
+    description: A world-writable /tmp, /var/tmp or /dev/shm without the sticky bit lets any user delete or replace other users' (and root's) temporary files.
+    severity: high
+    level: basic
+    tags: [cis]
+    probe: {type: file, path: [/tmp, /var/tmp, /dev/shm]}
+    expect: ["sticky eq true || world_writable eq false"]
+    remediation: Restore mode 1777.
+    fix: "chmod 1777 {path}"
+    tests:
+      pass: {meta: {/tmp: "d1777 0 0", /var/tmp: "d1777 0 0"}}
+      fail: {meta: {/tmp: "d0777 0 0"}}

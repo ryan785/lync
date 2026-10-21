@@ -1,0 +1,171 @@
+pack: devops
+title: CI/CD and code hosting (Jenkins, GitLab, GitLab Runner, Gitea/Forgejo)
+description: Authentication and secret-file settings of self-hosted CI/CD and Git services, which typically hold deploy keys and cloud credentials for everything else.
+category: config
+references:
+  - https://www.jenkins.io/doc/book/security/
+checks:
+  # ---- Jenkins -------------------------------------------------------------
+  - id: jenkins:security-disabled
+    title: Jenkins security is disabled
+    description: "<useSecurity>false</useSecurity> means no login at all: anyone who reaches Jenkins can run Groovy in the script console, i.e. execute commands as the jenkins user and read every stored credential."
+    severity: critical
+    level: basic
+    applies_if: {file: /var/lib/jenkins/config.xml}
+    probe: {type: content, path: /var/lib/jenkins/config.xml, regex: '<useSecurity>\s*false\s*</useSecurity>'}
+    expect: [match eq false]
+    remediation: Enable security (Manage Jenkins > Security) with the built-in user database or SSO and a matrix/role authorization strategy.
+    references: [https://www.jenkins.io/doc/book/security/managing-security/]
+    tests:
+      pass: {files: {/var/lib/jenkins/config.xml: "<hudson>\n  <useSecurity>true</useSecurity>\n</hudson>\n"}}
+      fail: {files: {/var/lib/jenkins/config.xml: "<hudson>\n  <useSecurity>false</useSecurity>\n</hudson>\n"}}
+      na: {files: {}}
+
+  - id: jenkins:unsecured-authorization
+    title: Jenkins authorization allows anyone to do anything
+    description: The Unsecured authorization strategy grants every visitor (including anonymous) full administrative access.
+    severity: critical
+    level: basic
+    applies_if: {file: /var/lib/jenkins/config.xml}
+    probe: {type: content, path: /var/lib/jenkins/config.xml, regex: 'AuthorizationStrategy\$Unsecured'}
+    expect: [match eq false]
+    remediation: Switch to "Logged-in users can do anything" (with anonymous read off) or Matrix-based security.
+    references: [https://www.jenkins.io/doc/book/security/access-control/]
+    tests:
+      pass: {files: {/var/lib/jenkins/config.xml: "<authorizationStrategy class=\"hudson.security.FullControlOnceLoggedInAuthorizationStrategy\"/>\n"}}
+      fail: {files: {/var/lib/jenkins/config.xml: "<authorizationStrategy class=\"hudson.security.AuthorizationStrategy$Unsecured\"/>\n"}}
+
+  - id: jenkins:anonymous-read
+    title: Jenkins grants anonymous read access
+    description: Anonymous users can browse jobs, build logs and workspaces, which routinely contain internal hostnames, tokens echoed by scripts and source code.
+    severity: high
+    applies_if: {file: /var/lib/jenkins/config.xml}
+    probe: {type: content, path: /var/lib/jenkins/config.xml, regex: '<denyAnonymousReadAccess>\s*false\s*</denyAnonymousReadAccess>'}
+    expect: [match eq false]
+    remediation: Untick "Allow anonymous read access" (or remove Overall/Read for Anonymous in the matrix).
+    tests:
+      pass: {files: {/var/lib/jenkins/config.xml: "<denyAnonymousReadAccess>true</denyAnonymousReadAccess>\n"}}
+      fail: {files: {/var/lib/jenkins/config.xml: "<denyAnonymousReadAccess>false</denyAnonymousReadAccess>\n"}}
+
+  - id: jenkins:signup-enabled
+    title: Jenkins allows users to sign up
+    description: With the Jenkins user database and signup enabled, anyone can create an account and receive whatever logged-in users are allowed (often everything).
+    severity: high
+    applies_if: {file: /var/lib/jenkins/config.xml}
+    probe: {type: content, path: /var/lib/jenkins/config.xml, regex: '<disableSignup>\s*false\s*</disableSignup>'}
+    expect: [match eq false]
+    remediation: Untick "Allow users to sign up" in the security realm settings.
+    tests:
+      pass: {files: {/var/lib/jenkins/config.xml: "<securityRealm class=\"hudson.security.HudsonPrivateSecurityRealm\">\n  <disableSignup>true</disableSignup>\n</securityRealm>\n"}}
+      fail: {files: {/var/lib/jenkins/config.xml: "<securityRealm class=\"hudson.security.HudsonPrivateSecurityRealm\">\n  <disableSignup>false</disableSignup>\n</securityRealm>\n"}}
+
+  - id: jenkins:secret-files-readable
+    title: Jenkins secret {path} is readable by other users
+    description: master.key and hudson.util.Secret decrypt every credential Jenkins stores; credentials.xml holds the encrypted credentials themselves.
+    severity: high
+    applies_if: {file: /var/lib/jenkins}
+    probe: {type: file, path: [/var/lib/jenkins/secrets/master.key, /var/lib/jenkins/secrets/hudson.util.Secret, /var/lib/jenkins/credentials.xml]}
+    expect: ["mode bits_none 0004"]
+    remediation: Restrict the file to the jenkins user (chmod 600) and rotate stored credentials if the host has untrusted local users.
+    fix: "chown jenkins:jenkins {path} && chmod 600 {path}"
+    references: [https://www.jenkins.io/doc/book/security/securing-jenkins/]
+    tests:
+      pass: {files: {/var/lib/jenkins/secrets/master.key: "x"}, meta: {/var/lib/jenkins/secrets/master.key: "0600 990 990"}}
+      fail: {files: {/var/lib/jenkins/secrets/master.key: "x"}, meta: {/var/lib/jenkins/secrets/master.key: "0644 990 990"}}
+
+  # ---- GitLab Runner -------------------------------------------------------
+  - id: gitlab-runner:config-readable
+    title: GitLab Runner config.toml is readable by other users
+    description: config.toml contains runner authentication tokens; with a token anyone can register as the runner and receive CI jobs, including their secret variables.
+    severity: high
+    applies_if: {file: /etc/gitlab-runner/config.toml}
+    probe: {type: file, path: /etc/gitlab-runner/config.toml}
+    expect: ["mode bits_none 0044"]
+    remediation: Restrict config.toml to root (chmod 600) and rotate the runner token if it was exposed.
+    fix: "chmod 600 /etc/gitlab-runner/config.toml"
+    references: [https://docs.gitlab.com/runner/configuration/advanced-configuration.html]
+    tests:
+      pass: {files: {/etc/gitlab-runner/config.toml: "concurrent = 1\n"}, meta: {/etc/gitlab-runner/config.toml: "0600 0 0"}}
+      fail: {files: {/etc/gitlab-runner/config.toml: "concurrent = 1\n"}, meta: {/etc/gitlab-runner/config.toml: "0644 0 0"}}
+
+  - id: gitlab-runner:privileged
+    title: GitLab Runner Docker executor runs jobs privileged
+    description: privileged = true runs every CI job (any branch, any committer) in a privileged container that can take over the runner host.
+    severity: high
+    applies_if: {file: /etc/gitlab-runner/config.toml}
+    probe: {type: content, path: /etc/gitlab-runner/config.toml, regex: '^\s*privileged\s*=\s*true'}
+    expect: [match eq false]
+    remediation: Set privileged = false; for Docker-in-Docker builds use rootless BuildKit/kaniko or a dedicated, isolated runner for protected branches only.
+    references: [https://docs.gitlab.com/runner/security/]
+    tests:
+      pass: {files: {/etc/gitlab-runner/config.toml: "[[runners]]\n  executor = \"docker\"\n  [runners.docker]\n    privileged = false\n"}}
+      fail: {files: {/etc/gitlab-runner/config.toml: "[[runners]]\n  executor = \"docker\"\n  [runners.docker]\n    privileged = true\n"}}
+
+  - id: gitlab-runner:docker-socket-volume
+    title: GitLab Runner mounts the Docker socket into CI jobs
+    description: Mounting /var/run/docker.sock into job containers lets any pipeline control the host's Docker daemon (root on the runner host).
+    severity: high
+    applies_if: {file: /etc/gitlab-runner/config.toml}
+    probe: {type: content, path: /etc/gitlab-runner/config.toml, regex: 'volumes\s*=\s*\[[^\]]*docker\.sock'}
+    expect: [match eq false]
+    remediation: Remove the socket volume; build images with kaniko/BuildKit rootless, or restrict this runner to trusted protected branches.
+    references: [https://docs.gitlab.com/runner/security/]
+    tests:
+      pass: {files: {/etc/gitlab-runner/config.toml: "    volumes = [\"/cache\"]\n"}}
+      fail: {files: {/etc/gitlab-runner/config.toml: "    volumes = [\"/var/run/docker.sock:/var/run/docker.sock\", \"/cache\"]\n"}}
+
+  # ---- GitLab (Omnibus) ----------------------------------------------------
+  - id: gitlab:secrets-readable
+    title: GitLab secret file {path} is readable by other users
+    description: gitlab-secrets.json holds the keys that decrypt CI variables, 2FA seeds and tokens; gitlab.rb often contains SMTP/LDAP/object-storage passwords.
+    severity: high
+    applies_if: {file: /etc/gitlab}
+    probe: {type: file, path: [/etc/gitlab/gitlab-secrets.json, /etc/gitlab/gitlab.rb]}
+    expect: ["mode bits_none 0004"]
+    remediation: Restrict both files to root (chmod 600); gitlab-ctl reconfigure keeps them that way.
+    fix: "chmod 600 {path}"
+    references: [https://docs.gitlab.com/omnibus/settings/backups.html]
+    tests:
+      pass: {files: {/etc/gitlab/gitlab-secrets.json: "{}"}, meta: {/etc/gitlab/gitlab-secrets.json: "0600 0 0"}}
+      fail: {files: {/etc/gitlab/gitlab.rb: "external_url 'https://git.example.org'\n"}, meta: {/etc/gitlab/gitlab.rb: "0644 0 0"}}
+
+  # ---- Gitea / Forgejo -----------------------------------------------------
+  - id: gitea:install-unlocked
+    title: Gitea/Forgejo installer is not locked ({_key})
+    description: With INSTALL_LOCK=false the web installer is reachable and lets anyone re-run setup, pointing the instance at their own database and admin account.
+    severity: critical
+    level: basic
+    applies_if: {file: [/etc/gitea/app.ini, /etc/forgejo/app.ini]}
+    probe: {type: config, format: ini, path: [/etc/gitea/app.ini, /etc/forgejo/app.ini], section: security, key: INSTALL_LOCK, per_file: true, default: "false"}
+    expect: [value eq true]
+    remediation: Finish installation or set INSTALL_LOCK = true in [security].
+    references: [https://docs.gitea.com/administration/config-cheat-sheet#security-security]
+    tests:
+      pass: {files: {/etc/gitea/app.ini: "[security]\nINSTALL_LOCK = true\n"}}
+      fail: {files: {/etc/gitea/app.ini: "[server]\nDOMAIN = git.example.org\n"}}
+
+  - id: gitea:open-registration
+    title: Gitea/Forgejo allows open self-registration ({_key})
+    description: DISABLE_REGISTRATION defaults to false, so anyone on the internet can create an account, push content and use CI runners or packages.
+    severity: medium
+    applies_if: {file: [/etc/gitea/app.ini, /etc/forgejo/app.ini]}
+    probe: {type: config, format: ini, path: [/etc/gitea/app.ini, /etc/forgejo/app.ini], section: service, key: DISABLE_REGISTRATION, per_file: true, default: "false"}
+    expect: [value eq true]
+    remediation: Set DISABLE_REGISTRATION = true (or ALLOW_ONLY_EXTERNAL_REGISTRATION / email domain allow-list) in [service].
+    references: [https://docs.gitea.com/administration/config-cheat-sheet#service-service]
+    tests:
+      pass: {files: {/etc/gitea/app.ini: "[service]\nDISABLE_REGISTRATION = true\n"}}
+      fail: {files: {/etc/forgejo/app.ini: "[service]\nREQUIRE_SIGNIN_VIEW = false\n"}}
+
+  - id: gitea:config-readable
+    title: Gitea/Forgejo app.ini {path} is readable by other users
+    description: app.ini contains SECRET_KEY, INTERNAL_TOKEN, the JWT secret and database credentials.
+    severity: high
+    applies_if: {file: [/etc/gitea/app.ini, /etc/forgejo/app.ini]}
+    probe: {type: file, path: [/etc/gitea/app.ini, /etc/forgejo/app.ini]}
+    expect: ["mode bits_none 0004"]
+    remediation: Restrict app.ini to the git service user (chmod 640 root:git or 600 git:git).
+    fix: "chmod o-rwx {path}"
+    tests:
+      pass: {files: {/etc/gitea/app.ini: "[security]\n"}, meta: {/etc/gitea/app.ini: "0640 0 998"}}
+      fail: {files: {/etc/gitea/app.ini: "[security]\n"}, meta: {/etc/gitea/app.ini: "0644 998 998"}}
