@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/ryan785/lync/internal/audit"
+	"github.com/ryan785/lync/internal/feed"
 	"io"
 	"os"
 	"path/filepath"
@@ -70,7 +71,7 @@ func (d *Daemon) RunOnce(ctx context.Context, cveID string, out io.Writer) (*Onc
 	res.Findings = len(d.lastFinds)
 	if d.lookup != nil && d.lastSources != nil {
 		res.FailedSources = append(res.FailedSources, d.lastSources.FailedSources()...)
-		if len(res.FailedSources) == 0 && !d.lastSources.Complete && len(d.lastSources.Sources) > 0 {
+		if len(res.FailedSources) == 0 && !d.lastSources.Complete && hasRemoteSource(d.lastSources) {
 			res.FailedSources = append(res.FailedSources, "lookup")
 		}
 	}
@@ -133,4 +134,15 @@ func pruneReports(dir string, retentionDays int, now time.Time) (int, error) {
 		removed++
 	}
 	return removed, firstErr
+}
+
+// hasRemoteSource: the scan depended on at least one lookup or bulk feed
+// (not only the local package-manager check, as with -sources none).
+func hasRemoteSource(s *feed.ScanSources) bool {
+	for _, st := range s.Sources {
+		if st.Kind != "local" {
+			return true
+		}
+	}
+	return false
 }
