@@ -13,3 +13,6 @@ Makefile       text eol=lf
 *.mod          text eol=lf
 *.sum          text eol=lf
 lync-run       text eol=lf
+
+# Golden test output - compared byte for byte.
+internal/reporter/testdata/*.txt text eol=lf

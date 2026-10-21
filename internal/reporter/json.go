@@ -19,8 +19,10 @@ type Report struct {
 	Kernel    collector.KernelInfo `json:"kernel"`
 	PkgCount  int                  `json:"package_count"`
 	Counts    Counts               `json:"counts"`
-	Impact    ImpactSummary        `json:"impact"`
-	Findings  []finding.Finding    `json:"findings"`
+	// LyncVersion is the lyncd version that produced the report.
+	LyncVersion string            `json:"lync_version,omitempty"`
+	Impact      ImpactSummary     `json:"impact"`
+	Findings    []finding.Finding `json:"findings"`
 	// DataSources says where the CVE data came from and whether the CVE
 	// section is complete. Absent in reports from older versions.
 	DataSources *feed.ScanSources `json:"data_sources,omitempty"`

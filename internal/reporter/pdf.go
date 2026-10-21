@@ -176,7 +176,7 @@ func (w *pdfWriter) drawExecSummary(s ImpactSummary, ds *feed.ScanSources) {
 
 	if s.TotalFindings == 0 {
 		msg := "No vulnerabilities detected on this host."
-		if ds != nil && !ds.Complete {
+		if incompleteText(ds) != "" {
 			msg = "No findings from the checks that completed. The CVE section is INCOMPLETE (see Data sources above), so this does not mean the host is free of known vulnerabilities."
 		}
 		pdf.MultiCell(contentW, 5, msg, "", "L", false)
@@ -476,10 +476,7 @@ func (w *pdfWriter) drawDataSources(ds *feed.ScanSources) {
 	}
 	pdf := w.pdf
 	pdf.Ln(2)
-	mode := "lookup (per-package / per-CVE API queries, no bulk download)"
-	if ds.Mode == feed.ModeFull {
-		mode = "full (bulk feed downloads)"
-	}
+	mode := feedModeText(ds)
 	label := func(k string) {
 		pdf.SetFont("Helvetica", "", 9)
 		pdf.SetTextColor(120, 120, 120)
@@ -499,23 +496,7 @@ func (w *pdfWriter) drawDataSources(ds *feed.ScanSources) {
 	label("Checked")
 	pdf.MultiCell(contentW-25, 5, checked, "", "L", false)
 	for _, s := range ds.Sources {
-		line := fmt.Sprintf("%s (%s): %s", s.Name, s.Kind, s.Status)
-		var parts []string
-		if s.Requests > 0 {
-			parts = append(parts, fmt.Sprintf("%d requests", s.Requests))
-		}
-		if s.CacheHits > 0 {
-			parts = append(parts, fmt.Sprintf("%d cached", s.CacheHits))
-		}
-		if s.Records > 0 {
-			parts = append(parts, fmt.Sprintf("%d records", s.Records))
-		}
-		if len(parts) > 0 {
-			line += ", " + strings.Join(parts, ", ")
-		}
-		if s.Detail != "" {
-			line += " - " + s.Detail
-		}
+		line := sourceLine(s)
 		label("Source")
 		pdf.SetFont("Helvetica", "", 8.5)
 		pdf.MultiCell(contentW-25, 4.5, line, "", "L", false)
@@ -523,11 +504,10 @@ func (w *pdfWriter) drawDataSources(ds *feed.ScanSources) {
 	if ds.UnfixedCVEs > 0 {
 		label("No fix yet")
 		pdf.SetFont("Helvetica", "", 8.5)
-		pdf.MultiCell(contentW-25, 4.5, fmt.Sprintf("%d CVEs affect installed packages but have no fixed version published yet (not listed as findings; check them with `lync cve`).", ds.UnfixedCVEs), "", "L", false)
+		pdf.MultiCell(contentW-25, 4.5, unfixedText(ds.UnfixedCVEs), "", "L", false)
 	}
-	if !ds.Complete {
+	if text := incompleteText(ds); text != "" {
 		pdf.Ln(1)
-		text := "CVE SECTION INCOMPLETE: " + strings.Join(ds.IncompleteReasons, "; ")
 		pdf.SetFont("Helvetica", "B", 9)
 		lines := pdf.SplitLines([]byte(text), contentW-6)
 		h := float64(len(lines))*4.5 + 4

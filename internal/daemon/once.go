@@ -20,7 +20,7 @@ import (
 // collector. Exactly one of these happens:
 //
 //   - cveID != "": print the CVECheck JSON to out
-//   - otherwise:   write the usual JSON+PDF report and print its JSON to out
+//   - otherwise:   write the usual JSON+PDF+text report and print its JSON to out
 func (d *Daemon) RunOnce(ctx context.Context, cveID string, out io.Writer) (*OnceResult, error) {
 	d.ctx = ctx
 	d.startedAt = time.Now()
@@ -97,7 +97,7 @@ type OnceResult struct {
 	ReportJSON    string
 }
 
-// pruneReports deletes lync-*.json / lync-*.pdf report files older than
+// pruneReports deletes lync-*.json / .pdf / .txt report files older than
 // retentionDays in dir. retentionDays <= 0 keeps everything. Returns the
 // number of files removed.
 func pruneReports(dir string, retentionDays int, now time.Time) (int, error) {
@@ -117,7 +117,7 @@ func pruneReports(dir string, retentionDays int, now time.Time) (int, error) {
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasPrefix(name, "lync-") ||
-			!(strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".pdf")) {
+			!(strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".pdf") || strings.HasSuffix(name, ".txt")) {
 			continue
 		}
 		info, err := e.Info()

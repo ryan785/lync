@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -33,8 +34,9 @@ Commands:
                       12 unknown to the cached feeds (run 'lync sync' first)
   checks [-config F]  List every rules check, its severity and whether it is
                       enabled under the config (no daemon needed)
-  render JSON [PDF]   Re-render a PDF from a JSON report. PDF path defaults
-                      to the JSON path with .pdf extension.
+  render JSON [OUT]   Re-render a JSON report. OUT ending in .txt writes the
+                      plain-text report, anything else a PDF; default is the
+                      JSON path with .pdf extension.
   notify test [-config F]
                       Send a test notification to every channel configured
                       under notify: in lync.yaml and print the result
@@ -331,19 +333,23 @@ func formatCVE(d map[string]any) {
 
 func runRender(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: lync render <json> [pdf]")
+		fmt.Fprintln(os.Stderr, "usage: lync render <json> [out.pdf|out.txt]")
 		os.Exit(1)
 	}
 	jsonPath := args[0]
-	pdfPath := strings.TrimSuffix(jsonPath, ".json") + ".pdf"
+	outPath := strings.TrimSuffix(jsonPath, ".json") + ".pdf"
 	if len(args) > 1 {
-		pdfPath = args[1]
+		outPath = args[1]
 	}
-	if err := reporter.WritePDFFromJSON(jsonPath, pdfPath); err != nil {
+	write := reporter.WritePDFFromJSON
+	if strings.EqualFold(filepath.Ext(outPath), ".txt") {
+		write = reporter.WriteTextFromJSON
+	}
+	if err := write(jsonPath, outPath); err != nil {
 		fmt.Fprintln(os.Stderr, red("lync:"), err)
 		os.Exit(2)
 	}
-	fmt.Printf("%s  %s\n", green("Rendered:"), cyan(pdfPath))
+	fmt.Printf("%s  %s\n", green("Rendered:"), cyan(outPath))
 }
 
 func runReports(c ipc.Client, g globalFlags) {

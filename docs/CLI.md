@@ -98,14 +98,17 @@ WHEN              SIZE   NAME
 2026-05-13 17:20  3.6K   lync-2026-05-13_17-20-40-pkg_openssh.pdf
 ```
 
-### `lync render <json> [pdf]`
+### `lync render <json> [out.pdf|out.txt]`
 
-Regenerate a PDF from any past JSON report. If you omit the PDF path,
-it's the JSON path with `.json` replaced by `.pdf`.
+Regenerate a report from any past JSON report. The output extension picks
+the format: `.txt` writes the plain-text report, anything else a PDF. If
+you omit the output path, it's the JSON path with `.json` replaced by
+`.pdf`.
 
 ```sh
 lync render /var/lib/lync/reports/lync-2026-05-13_18-37-40.json
 lync render report.json /tmp/output.pdf
+lync render report.json /tmp/output.txt
 ```
 
 The JSON is the canonical artifact — modifying it (e.g. piping through

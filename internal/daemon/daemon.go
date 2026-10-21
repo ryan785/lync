@@ -274,6 +274,7 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 	rep.DataSources = sources
 	rep.Inventory = inv
 	rep.Coverage = coverage
+	rep.LyncVersion = Version
 	if err := reporter.WriteReport(jsonPath, rep); err != nil {
 		d.log.Error("write json", "err", err)
 		audit.Log("REPORT", "write json failed: %v", err)
@@ -284,6 +285,13 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 			audit.Log("REPORT", "render pdf failed: %v", err)
 		} else {
 			logFileWritten(pdfPath)
+		}
+		txtPath := filepath.Join(d.cfg.Report.Dir, base+".txt")
+		if err := reporter.WriteTextFromJSON(jsonPath, txtPath); err != nil {
+			d.log.Error("render text", "err", err)
+			audit.Log("REPORT", "render text failed: %v", err)
+		} else {
+			logFileWritten(txtPath)
 		}
 	}
 	audit.Log("SUMMARY", "findings=%d critical=%d high=%d medium=%d low=%d info=%d unknown=%d suppressed_by_applicability=%d",

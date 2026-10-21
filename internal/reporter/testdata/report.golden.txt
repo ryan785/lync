@@ -1,0 +1,215 @@
+====================================================================================================
+LYNC SECURITY REPORT
+====================================================================================================
+Host        host1.example.com
+OS          Rocky Linux 9.4 (Blue Onyx)
+Kernel      5.14.0-427.13.1.el9_4.x86_64
+Packages    612 installed
+Services    2 running
+Scanned     2026-10-21 14:03:05 UTC
+Lync        0.5.0
+CVE data    lookup (per-package / per-CVE API queries, no bulk download)
+Checked     2026-10-21 14:02:50 UTC, 612 packages checked, ecosystem Rocky Linux:9
+Sources     osv (lookup): ok, 7 requests, 342 records
+            nvd (lookup): partial, 9 requests, 2 cached, 7 records - 2 requests failed: HTTP 503
+            dnf (local): ok, 1 requests, 1 records
+No fix yet  4 CVEs affect installed packages but have no fixed version published yet (not listed as
+            findings; check them with `lync cve`).
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! CVE SECTION INCOMPLETE: nvd: 2 of 9 CVE lookups failed (severity enrichment incomplete)
+!! A short or empty CVE list below does NOT mean the host is free of known vulnerabilities.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+SUMMARY
+----------------------------------------------------------------------------------------------------
+  Critical  High  Medium  Low  Info  Unknown  Total
+         3     4       4    1     1        1     14
+
+Findings    9 vulnerability findings in 6 packages/components, 5 configuration and check findings
+Highest     CVSS 9.8, CVE-2026-10001 (php-fpm)
+Reboot      YES - 2 kernel finding(s) (CVE-2026-20001, CVE-2026-20002); reboot after updating the
+            kernel
+Services    php-fpm.service (running services whose package has findings)
+
+FIX FIRST
+----------------------------------------------------------------------------------------------------
+1) Update packages: 7 vulnerability findings in 4 packages, worst first
+
+   php-fpm       8.0.30-1.el9 -> 8.0.30-3.el9        fixes 3 CVEs (2 critical, 1 high)
+   kernel        5.14.0-427.13.1.el9_4 -> 5.14.0-503.11.1.el9_5
+                 fixes 2 CVEs (1 high, 1 medium) [reboot]
+   curl          7.76.1-29.el9_4 -> 7.76.1-31.el9    fixes 1 issue (1 medium)
+   openssl-libs  1:3.0.7-27.el9 -> 1:3.0.7-28.el9_4  fixes 1 CVE (1 medium)
+
+   Run as root:
+     dnf upgrade --refresh curl kernel openssl-libs php-fpm
+   Then reboot: a kernel update only takes effect after a reboot.
+
+   No fix available yet (no fixed version published; watch for updates or mitigate):
+     libxml2  2.9.13-6.el9_4  affected by 1 CVE (1 low)
+
+2) Update application components (installed outside the package manager)
+
+   lodash  4.17.15 -> 4.17.21  fixes 1 CVE (1 high)
+     Fix         upgrade lodash to >= 4.17.21 in /srv/app (npm install lodash@4.17.21)
+
+3) Critical and high configuration findings (2)
+
+   [CRITICAL] Git repository exposed under the web root
+     ID          web-exposure:dotgit:/var/www/html
+     Fix         Deny dot-files in the nginx server block: location ~ /\.(?!well-known) { deny all;
+                 } and move the repository out of the web root
+   [HIGH] SSH allows root login with a password
+     ID          ssh-config:permit-root-login
+     Fix         Set 'PermitRootLogin prohibit-password' (or 'no') in /etc/ssh/sshd_config, then:
+                 systemctl reload sshd
+
+ALL FINDINGS (14)
+----------------------------------------------------------------------------------------------------
+CRITICAL (3)
+------------
+  1. CVE-2026-10001 affects php-fpm
+     ID          CVE-2026-10001:php-fpm
+     CVE         CVE-2026-10001 CVSS 9.8
+     Package     php-fpm 8.0.30-1.el9 -> 8.0.30-3.el9
+     Evidence    installed: php-fpm-8.0.30-1.el9.x86_64; reported by: osv
+     Fix         update php-fpm to 8.0.30-3.el9 or later
+     Refs        https://osv.dev/vulnerability/CVE-2026-10001
+                 https://nvd.nist.gov/vuln/detail/CVE-2026-10001
+                 (+1 more references in the JSON report)
+
+  2. CVE-2026-10002 affects php-fpm
+     ID          CVE-2026-10002:php-fpm
+     CVE         CVE-2026-10002 CVSS 9.1
+     Package     php-fpm 8.0.30-1.el9 -> 8.0.30-2.el9
+     Evidence    installed: php-fpm-8.0.30-1.el9.x86_64; reported by: osv
+     Fix         update php-fpm to 8.0.30-2.el9 or later
+     Refs        https://osv.dev/vulnerability/CVE-2026-10002
+                 https://nvd.nist.gov/vuln/detail/CVE-2026-10002
+                 (+1 more references in the JSON report)
+
+  3. Git repository exposed under the web root
+     ID          web-exposure:dotgit:/var/www/html
+     Evidence    /var/www/html/.git/config is readable and nginx serves /var/www/html (server
+                 10.0.0.5:80); the repository history and any committed configuration are
+                 downloadable by anyone who can reach the site
+     Fix         Deny dot-files in the nginx server block: location ~ /\.(?!well-known) { deny all;
+                 } and move the repository out of the web root
+
+HIGH (4)
+--------
+  4. CVE-2026-20001 affects kernel
+     ID          CVE-2026-20001:kernel
+     CVE         CVE-2026-20001 CVSS 7.8
+     Package     kernel 5.14.0-427.13.1.el9_4 -> 5.14.0-503.11.1.el9_5
+     Evidence    installed: kernel-5.14.0-427.13.1.el9_4.x86_64; reported by: osv
+     Fix         update kernel to 5.14.0-503.11.1.el9_5 or later
+     Refs        https://osv.dev/vulnerability/CVE-2026-20001
+                 https://nvd.nist.gov/vuln/detail/CVE-2026-20001
+                 (+1 more references in the JSON report)
+
+  5. CVE-2026-10003 affects php-fpm
+     ID          CVE-2026-10003:php-fpm
+     CVE         CVE-2026-10003 CVSS 7.5
+     Package     php-fpm 8.0.30-1.el9 -> 8.0.30-3.el9
+     Evidence    installed: php-fpm-8.0.30-1.el9.x86_64; reported by: osv
+     Fix         update php-fpm to 8.0.30-3.el9 or later
+     Refs        https://osv.dev/vulnerability/CVE-2026-10003
+                 https://nvd.nist.gov/vuln/detail/CVE-2026-10003
+                 (+1 more references in the JSON report)
+
+  6. CVE-2026-50001 affects lodash 4.17.15 (npm)
+     ID          CVE-2026-50001:npm/lodash@/srv/app/package-lock.json
+     CVE         CVE-2026-50001 CVSS 7.4
+     Package     lodash 4.17.15 -> 4.17.21
+     Evidence    /srv/app/package-lock.json declares lodash 4.17.15
+     Fix         upgrade lodash to >= 4.17.21 in /srv/app (npm install lodash@4.17.21)
+
+  7. SSH allows root login with a password
+     ID          ssh-config:permit-root-login
+     Evidence    /etc/ssh/sshd_config: PermitRootLogin yes (line 40)
+     Fix         Set 'PermitRootLogin prohibit-password' (or 'no') in /etc/ssh/sshd_config, then:
+                 systemctl reload sshd
+     Refs        https://man.openbsd.org/sshd_config#PermitRootLogin
+
+MEDIUM (4)
+----------
+  8. CVE-2026-30001 affects openssl-libs
+     ID          CVE-2026-30001:openssl-libs
+     CVE         CVE-2026-30001 CVSS 5.9
+     Package     openssl-libs 1:3.0.7-27.el9 -> 1:3.0.7-28.el9_4
+     Evidence    installed: openssl-libs-1:3.0.7-27.el9.x86_64; reported by: osv
+     Fix         update openssl-libs to 1:3.0.7-28.el9_4 or later
+     Refs        https://osv.dev/vulnerability/CVE-2026-30001
+                 https://nvd.nist.gov/vuln/detail/CVE-2026-30001
+                 (+1 more references in the JSON report)
+
+  9. CVE-2026-20002 affects kernel
+     ID          CVE-2026-20002:kernel
+     CVE         CVE-2026-20002 CVSS 5.5
+     Package     kernel 5.14.0-427.13.1.el9_4 -> 5.14.0-503.11.1.el9_5
+     Evidence    installed: kernel-5.14.0-427.13.1.el9_4.x86_64; reported by: osv
+     Fix         update kernel to 5.14.0-503.11.1.el9_5 or later
+     Refs        https://osv.dev/vulnerability/CVE-2026-20002
+                 https://nvd.nist.gov/vuln/detail/CVE-2026-20002
+                 (+1 more references in the JSON report)
+
+ 10. Security update pending for curl (RLSA-2026:1234)
+     ID          pkgmgr:security-update:curl
+     Package     curl 7.76.1-29.el9_4 -> 7.76.1-31.el9
+     Evidence    dnf reports a security update to 7.76.1-31.el9; no CVE lookup source matched this
+                 package
+     Fix         dnf upgrade curl
+
+ 11. Address space layout randomisation is reduced
+     ID          hardening:aslr
+     Evidence    kernel.randomize_va_space = 1
+     Fix         sysctl -w kernel.randomize_va_space=2 and persist it in /etc/sysctl.d/
+
+LOW (1)
+-------
+ 12. CVE-2026-40001 affects libxml2
+     ID          CVE-2026-40001:libxml2
+     CVE         CVE-2026-40001 CVSS 3.3
+     Package     libxml2 2.9.13-6.el9_4 (no fix published yet)
+     Evidence    installed: libxml2-2.9.13-6.el9_4.x86_64; reported by: osv
+     Refs        https://osv.dev/vulnerability/CVE-2026-40001
+                 https://nvd.nist.gov/vuln/detail/CVE-2026-40001
+                 (+1 more references in the JSON report)
+
+INFO (1)
+--------
+ 13. No default inactivity lock for new accounts
+     ID          accounts:inactive-default
+     Evidence    useradd -D: INACTIVE=-1
+
+UNKNOWN (1)
+-----------
+ 14. Critical file changed: /etc/passwd
+     ID          monitor:/etc/passwd
+
+APPLICATION INVENTORY
+----------------------------------------------------------------------------------------------------
+Components  3 outside the package manager (PyPI 1, npm 2)
+OSV.dev     3 looked up, 1 with known vulnerabilities (listed under ALL FINDINGS)
+Walk        1840 directory entries, 12 files parsed in 1.234s
+Warnings    1. The full component list is in the JSON report.
+
+CHECK COVERAGE
+----------------------------------------------------------------------------------------------------
+Pack          Checks  Applicable  Passed  Failed  Skipped   N/A  Disabled
+ssh               12          12      11       1        0     0         0
+web-exposure       9           6       5       1        0     3         0
+php                8           7       6       0        1     1         0
+TOTAL             31          25      22       2        1     4         2
+
+1 packs did not apply to this host (software not present, or every check disabled; counted in
+TOTAL): container
+
+Skipped checks (could not decide on this host):
+  - php:expose-php: php -i timed out after 20s
+
+====================================================================================================
+Generated 2026-10-21 14:03:05 UTC by lync 0.5.0. The JSON report is the canonical record.
+Re-render: lync render <report.json> <out.txt|out.pdf>

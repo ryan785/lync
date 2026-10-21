@@ -20,7 +20,9 @@ func TestPruneReports(t *testing.T) {
 		"lync-old.pdf":   -40 * 24 * time.Hour,
 		"lync-new.json":  -1 * time.Hour,
 		"unrelated.json": -400 * 24 * time.Hour, // not ours: never touched
-		"lync-notes.txt": -400 * 24 * time.Hour, // wrong extension
+		"lync-old.txt":   -40 * 24 * time.Hour,
+		"lync-new.txt":   -1 * time.Hour,
+		"lync-notes.md":  -400 * 24 * time.Hour, // wrong extension
 	}
 	for name, age := range files {
 		p := filepath.Join(dir, name)
@@ -36,10 +38,10 @@ func TestPruneReports(t *testing.T) {
 		t.Fatalf("retention 0 must keep everything, removed %d (%v)", n, err)
 	}
 	n, err := pruneReports(dir, 30, now)
-	if err != nil || n != 2 {
-		t.Fatalf("pruneReports removed %d (%v), want 2", n, err)
+	if err != nil || n != 3 {
+		t.Fatalf("pruneReports removed %d (%v), want 3", n, err)
 	}
-	for _, keep := range []string{"lync-new.json", "unrelated.json", "lync-notes.txt"} {
+	for _, keep := range []string{"lync-new.json", "lync-new.txt", "unrelated.json", "lync-notes.md"} {
 		if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
 			t.Errorf("%s should survive: %v", keep, err)
 		}
