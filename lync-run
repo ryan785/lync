@@ -210,6 +210,7 @@ for host in $HOSTS; do
 	fi
 	for f in "$hd"/lync-*.json; do [ -f "$f" ] && mv "$f" "$hd/report.json"; done
 	for f in "$hd"/lync-*.pdf; do [ -f "$f" ] && mv "$f" "$hd/report.pdf"; done
+	for f in "$hd"/lync-*.txt; do [ -f "$f" ] && mv "$f" "$hd/report.txt"; done
 
 	# Fetch the host's run log and confirm the temp dir is gone.
 	rlog=$(sed -n 's/^LYNC_LOG_PATH=//p' "$hd/remote-stderr.txt" | tail -n 1)
@@ -240,6 +241,9 @@ for host in $HOSTS; do
 		echo "$name $pdf_abs" >>"$PDFS"
 		echo "   PDF: $pdf_abs" >&2
 	fi
+	if [ -f "$hd/report.txt" ]; then
+		echo "   TXT: $(cd "$hd" && pwd)/report.txt" >&2
+	fi
 	r=$hd/report.json
 	printf '%-28s %-5s %-5s %-5s %-5s %-5s %-6s %-18s %s\n' "$name" "$rc" \
 		"$(field critical "$r")" "$(field high "$r")" "$(field medium "$r")" "$(field low "$r")" "$(field total "$r")" \
@@ -269,7 +273,7 @@ open_file() {
 }
 if [ -s "$PDFS" ]; then
 	echo >&2
-	echo "PDF reports:" >&2
+	echo "PDF reports (plain-text copy next to each as report.txt):" >&2
 	while read -r h p; do
 		printf '  %-28s %s\n' "$h" "$p" >&2
 		[ "$OPEN" = 1 ] && open_file "$p"

@@ -8,8 +8,8 @@
 # Proves: results come back, the run log has the promised sections, the
 # temp dir is removed on success, SIGTERM and checksum failure, nothing
 # else named lync is created, and mode (b) (download from LYNC_BASE_URL)
-# verifies the checksum, writes the PDF into the caller's directory (owned
-# by SUDO_USER) and cleans up.
+# verifies the checksum, writes the PDF and text reports into the caller's
+# directory (owned by SUDO_USER) and cleans up.
 
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -67,6 +67,11 @@ check "lync-run exit 0 (got $rc)" test "$rc" = 0
 HD=$(find "$WORK/results" -mindepth 2 -maxdepth 2 -type d -name fakehost | head -n 1)
 check "report.json returned" test -s "$HD/report.json"
 check "report.pdf returned" test -s "$HD/report.pdf"
+check "report.txt returned" grep -q '^LYNC SECURITY REPORT' "$HD/report.txt"
+check "driver prints the text report path" grep -q 'TXT: .*/report.txt' "$WORK/driver.err"
+extra=$(find "$HD" -mindepth 1 -maxdepth 1 ! -name 'report.json' ! -name 'report.pdf' ! -name 'report.txt' \
+	! -name lync-run.log ! -name remote-stderr.txt ! -name ssh-probe.err)
+check "nothing unexpected returned (${extra:-none})" test -z "$extra"
 check "host log copied back" test -s "$HD/lync-run.log"
 LOG=$WORK/remote/lync-run.log
 check "log: POLICY statement" grep -q ' POLICY .*installs nothing' "$LOG"
@@ -123,20 +128,29 @@ rc=$?
 check "mode b exit 0 (got $rc)" test "$rc" = 0
 PDF=$(find "$WORK/cwd" -name 'lync-*.pdf' | head -n 1)
 check "mode b: PDF report in the current directory" test -s "$PDF"
+TXT=${PDF%.pdf}.txt
 check "mode b: --json writes the JSON next to it" sh -c "ls '$WORK'/cwd/lync-*.json >/dev/null"
+check "mode b: text report next to the PDF" grep -q '^LYNC SECURITY REPORT' "$TXT"
+check "mode b: text report has the action plan" grep -q '^FIX FIRST' "$TXT"
+left=$(find "$WORK/cwd" -mindepth 1 | sed "s|^$WORK/cwd/||" | sort | tr '\n' ' ')
+check "mode b: cwd holds only the pdf+txt+json ($left)" test "$(find "$WORK/cwd" -mindepth 1 | wc -l)" = 3
 check "mode b: report path printed at the end" grep -q "==> Report: $PDF" "$WORK/b.err"
+check "mode b: text path printed at the end" grep -q "==> Text:   $TXT" "$WORK/b.err"
 check "mode b: nothing large on stdout by default" test ! -s "$WORK/b.out"
 if [ "$(id -u)" = 0 ] && id nobody >/dev/null 2>&1; then
 	check "mode b: PDF chowned to SUDO_USER" test "$(stat -c %U "$PDF")" = nobody
+	check "mode b: text report chowned to SUDO_USER" test "$(stat -c %U "$TXT")" = nobody
 fi
 check "mode b: log names the report" grep -q " REPORT+ $PDF" "$WORK/b.log"
+check "mode b: log names the text report" grep -q " REPORT+ $TXT" "$WORK/b.log"
 check "mode b: END lists the report" grep -q ' END .*report=' "$WORK/b.log"
-check "mode b: POLICY mentions the report" grep -q ' POLICY .*report (PDF+JSON) in ' "$WORK/b.log"
+check "mode b: POLICY mentions the report" grep -q ' POLICY .*report (PDF+TXT+JSON) in ' "$WORK/b.log"
 check "mode b: download logged" grep -q ' FETCH .*lyncd-linux-' "$WORK/b.log"
 check "mode b: cleanup verified" grep -q ' CLEANUP .*verified absent' "$WORK/b.log"
 LYNC_BASE_URL=file://$DIST sh ./run.sh --sources none --out "$WORK/out2" --print-json --log "$WORK/b2.log" >"$WORK/b2.json" 2>/dev/null
 check "mode b: --print-json still prints the report" grep -q '"findings"' "$WORK/b2.json"
 check "mode b: --out DIR" sh -c "ls '$WORK'/out2/lync-*.pdf >/dev/null"
+check "mode b: --out DIR gets the text report" sh -c "ls '$WORK'/out2/lync-*.txt >/dev/null"
 
 echo "== --cve with no feeds -> unknown (12)"
 LYNC_BASE_URL=file://$DIST sh ./run.sh --sources none --cve CVE-2026-109618 --log "$WORK/cve.log" >"$WORK/cve.json" 2>/dev/null
