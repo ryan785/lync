@@ -296,6 +296,7 @@ func TestRedact(t *testing.T) {
 		"url=https://user:" + testSecret + "@example.org/x":  "url=https://user:<redacted>@example.org/x",
 		"token ghp_" + strings.Repeat("a1", 15):              "token <redacted token>",
 		"ssl_certificate_key /etc/ssl/private/site.key":      "ssl_certificate_key /etc/ssl/private/site.key",
+		"/etc/pam.d/common-password: match=false":            "/etc/pam.d/common-password: match=false",
 		"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE": "<redacted private key>",
 	}
 	for in, want := range cases {

@@ -861,11 +861,19 @@ func redact(s string) string {
 	s = redactPEMRE.ReplaceAllString(s, "<redacted private key>")
 	s = redactURLRE.ReplaceAllString(s, "$1:<redacted>@")
 	s = redactTokRE.ReplaceAllString(s, "<redacted token>")
-	return redactKVRE.ReplaceAllStringFunc(s, func(m string) string {
-		sm := redactKVRE.FindStringSubmatch(m)
-		if notSecretRE.MatchString(sm[3]) {
-			return m
+	var b strings.Builder
+	last := 0
+	for _, m := range redactKVRE.FindAllStringSubmatchIndex(s, -1) {
+		key, sep, val := s[m[2]:m[3]], s[m[4]:m[5]], s[m[6]:m[7]]
+		// A key that is the tail of a path (/etc/pam.d/common-password: ...)
+		// names a file, not a secret.
+		if notSecretRE.MatchString(val) || (m[0] > 0 && s[m[0]-1] == '/') {
+			continue
 		}
-		return sm[1] + sm[2] + "<redacted>"
-	})
+		b.WriteString(s[last:m[0]])
+		b.WriteString(key + sep + "<redacted>")
+		last = m[1]
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
