@@ -1,0 +1,380 @@
+pack: mysql
+title: MySQL / MariaDB server
+description: Server configuration (my.cnf with !include/!includedir; [mysqld], [mariadb], [mariadbd], [server] and [galera] sections), file permissions and process user of MySQL, MariaDB and Percona servers.
+category: config
+applies_if:
+  file: [/usr/sbin/mysqld, /usr/sbin/mariadbd, /usr/libexec/mysqld, /usr/libexec/mariadbd, /usr/bin/mysqld_safe]
+references:
+  - https://dev.mysql.com/doc/refman/8.4/en/security-guidelines.html
+  - https://mariadb.com/kb/en/securing-mariadb/
+test_base:
+  files: {/usr/sbin/mysqld: ""}
+checks:
+  - id: mysql:skip-grant-tables
+    title: MySQL starts with skip-grant-tables (no authentication)
+    description: skip-grant-tables disables the privilege system entirely, so anyone who can connect is a superuser. It is meant only for one-off password recovery.
+    severity: critical
+    level: basic
+    probe: {type: config, format: mycnf, section: mysqld, key: skip-grant-tables}
+    expect: [set eq false]
+    evidence: "{file}: skip-grant-tables is set"
+    remediation: Remove skip-grant-tables from the server configuration and restart the server; reset any passwords that were changed while it was active.
+    fix: "grep -rn skip.grant.tables /etc/my.cnf /etc/my.cnf.d /etc/mysql; systemctl restart mysqld"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/server-options.html#option_mysqld_skip-grant-tables]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\ndatadir=/var/lib/mysql\n"}}
+      fail:
+        - {files: {/etc/my.cnf: "[mysqld]\nskip-grant-tables\n"}}
+        - {files: {/etc/my.cnf: "!includedir /etc/my.cnf.d\n", /etc/my.cnf.d/server.cnf: "[mariadb]\nskip_grant_tables=1\n"}}
+      na: {files: {/usr/sbin/mysqld: "!absent", /etc/my.cnf: "[mysqld]\nskip-grant-tables\n"}}
+
+  - id: mysql:local-infile
+    title: LOAD DATA LOCAL INFILE is enabled
+    description: local_infile lets a client (or a malicious server, or SQL injection through a client) read arbitrary files from the client host. MySQL 8 disables it by default; explicitly enabling it re-opens that path.
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: mycnf, section: mysqld, key: local-infile, default: "0"}
+    expect: ["value in 0,off,false"]
+    remediation: Set local_infile=0 in [mysqld] unless an application genuinely needs LOAD DATA LOCAL.
+    fix: "printf '[mysqld]\\nlocal_infile=0\\n' > /etc/my.cnf.d/60-lync.cnf && systemctl restart mysqld"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/load-data-local-security.html]
+    tests:
+      pass: [{files: {/etc/my.cnf: "[mysqld]\n"}}, {files: {/etc/my.cnf: "[mysqld]\nlocal-infile=0\n"}}]
+      fail: {files: {/etc/my.cnf: "[mysqld]\nlocal_infile=1\n"}}
+
+  - id: mariadb:local-infile-default
+    title: MariaDB allows LOAD DATA LOCAL INFILE by default
+    description: MariaDB (unlike MySQL 8) enables local_infile unless it is turned off, so clients can be tricked into sending local files to the server.
+    severity: low
+    level: strict
+    applies_if: {package: [mariadb-server, MariaDB-server]}
+    probe: {type: config, format: mycnf, section: mysqld, key: local-infile, default: "1"}
+    expect: ["value in 0,off,false"]
+    remediation: Set local_infile=0 in the [mariadb] or [mysqld] section.
+    fix: "printf '[mariadb]\\nlocal_infile=0\\n' > /etc/my.cnf.d/60-lync.cnf"
+    references: [https://mariadb.com/kb/en/server-system-variables/#local_infile]
+    tests:
+      pass: {packages: {mariadb-server: 10.11.6-1}, files: {/etc/my.cnf: "[mariadb]\nlocal_infile=OFF\n"}}
+      fail: {packages: {mariadb-server: 10.11.6-1}, files: {/etc/my.cnf: "[mysqld]\n"}}
+      na: {packages: {mysql-server: 8.0.36-1}, files: {/etc/my.cnf: "[mysqld]\n"}}
+
+  - id: mysql:bind-all-interfaces
+    title: MySQL is configured to listen on all interfaces
+    description: With bind-address unset, '*', 0.0.0.0 or '::' the server accepts TCP connections on every address. Debian/Ubuntu packages bind 127.0.0.1; RHEL-family MariaDB packages listen everywhere by default.
+    severity: medium
+    probe: {type: config, format: mycnf, section: mysqld, keys: [bind-address, skip-networking], default: "*"}
+    expect: ["value not_in *,0.0.0.0,::,0.0.0.0/0 || skip_networking in on,1,true"]
+    remediation: Bind to 127.0.0.1 (or a private interface) unless remote clients must connect, and firewall port 3306 to known clients.
+    fix: "printf '[mysqld]\\nbind-address=127.0.0.1\\n' > /etc/my.cnf.d/60-lync.cnf && systemctl restart mysqld"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_bind_address]
+    tests:
+      pass:
+        - {files: {/etc/mysql/my.cnf: "[mysqld]\nbind-address = 127.0.0.1\n"}}
+        - {files: {/etc/my.cnf: "[mysqld]\nskip-networking\n"}}
+        - {files: {/etc/my.cnf: "[mysqld]\nbind-address=10.0.0.5\n"}}
+      fail:
+        - {files: {/etc/my.cnf: "[mysqld]\ndatadir=/var/lib/mysql\n"}}
+        - {files: {/etc/my.cnf: "[mysqld]\nbind-address=0.0.0.0\n"}}
+
+  - id: mysql:secure-file-priv-empty
+    title: secure_file_priv is explicitly empty
+    description: An empty secure_file_priv lets any account with the FILE privilege read and write files anywhere the server user can (SELECT ... INTO OUTFILE, LOAD_FILE()), a classic path from SQL injection to code execution.
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: mycnf, section: mysqld, key: secure-file-priv}
+    expect: ["set eq false || value not_empty"]
+    evidence: "{file}: secure_file_priv is set to an empty value (no restriction)"
+    remediation: Point secure_file_priv at a dedicated directory (e.g. /var/lib/mysql-files) or set it to NULL to disable import/export.
+    fix: "printf '[mysqld]\\nsecure_file_priv=/var/lib/mysql-files\\n' > /etc/my.cnf.d/60-lync.cnf"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_secure_file_priv]
+    tests:
+      pass: [{files: {/etc/my.cnf: "[mysqld]\n"}}, {files: {/etc/my.cnf: "[mysqld]\nsecure-file-priv=/var/lib/mysql-files\n"}}]
+      fail: [{files: {/etc/my.cnf: "[mysqld]\nsecure_file_priv=\n"}}, {files: {/etc/my.cnf: "[mysqld]\nsecure_file_priv=\"\"\n"}}]
+
+  - id: mariadb:secure-file-priv-unset
+    title: MariaDB does not restrict FILE import/export (secure_file_priv unset)
+    description: MariaDB's default secure_file_priv is empty, so accounts with the FILE privilege can read and write files anywhere the server user can.
+    severity: low
+    level: strict
+    applies_if: {package: [mariadb-server, MariaDB-server]}
+    probe: {type: config, format: mycnf, section: mysqld, key: secure-file-priv}
+    expect: [value not_empty]
+    remediation: Set secure_file_priv to a dedicated directory in the [mariadb] section.
+    fix: "printf '[mariadb]\\nsecure_file_priv=/var/lib/mysql-files\\n' > /etc/my.cnf.d/60-lync.cnf"
+    references: [https://mariadb.com/kb/en/server-system-variables/#secure_file_priv]
+    tests:
+      pass: {packages: {mariadb-server: 10.11.6-1}, files: {/etc/my.cnf: "[mariadb]\nsecure_file_priv=/var/lib/mysql-files\n"}}
+      fail: {packages: {mariadb-server: 10.11.6-1}, files: {/etc/my.cnf: "[mariadb]\n"}}
+      na: {files: {/etc/my.cnf: "[mariadb]\n"}}
+
+  - id: mysql:symbolic-links
+    title: Symbolic links to tables are enabled
+    description: symbolic-links lets table files point outside the data directory; combined with FILE/ALTER privileges it can be used to overwrite files as the server user. MySQL 8 deprecates it and MariaDB recommends disabling it.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: mycnf, section: mysqld, key: symbolic-links, default: "0"}
+    expect: ["value in 0,off,false"]
+    remediation: Set symbolic-links=0 (or skip-symbolic-links) in [mysqld].
+    fix: "printf '[mysqld]\\nsymbolic-links=0\\n' > /etc/my.cnf.d/60-lync.cnf"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/symbolic-links-to-tables.html]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\nsymbolic-links=0\n"}}
+      fail: {files: {/etc/my.cnf: "[mysqld]\nsymbolic-links=1\n"}}
+
+  - id: mysql:general-log
+    title: General query log is enabled
+    description: The general log records every statement, including CREATE USER / SET PASSWORD / IDENTIFIED BY clauses with plaintext passwords, and grows without bound.
+    severity: low
+    probe: {type: config, format: mycnf, section: mysqld, key: general-log, default: "0"}
+    expect: ["value in 0,off,false"]
+    remediation: Turn the general log off outside short debugging sessions and protect or remove existing log files.
+    fix: "printf '[mysqld]\\ngeneral_log=0\\n' > /etc/my.cnf.d/60-lync.cnf"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/query-log.html]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\ngeneral_log=OFF\n"}}
+      fail: {files: {/etc/my.cnf: "[mysqld]\ngeneral_log=1\ngeneral_log_file=/var/log/mysql/all.log\n"}}
+
+  - id: mysql:log-raw
+    title: log-raw writes passwords to the logs
+    description: With log_raw enabled MySQL no longer rewrites passwords in statements written to the general, slow and binary logs.
+    severity: medium
+    tags: [cis]
+    probe: {type: config, format: mycnf, section: mysqld, key: log-raw, default: "0"}
+    expect: ["value in 0,off,false"]
+    remediation: Remove log-raw from the configuration.
+    fix: "grep -rn log.raw /etc/my.cnf /etc/my.cnf.d /etc/mysql"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/password-logging.html]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\n"}}
+      fail: {files: {/etc/my.cnf: "[mysqld]\nlog-raw\n"}}
+
+  - id: mysql:old-passwords
+    title: Pre-4.1 password hashing is enabled (old_passwords)
+    description: old_passwords=1 makes MariaDB store new passwords with the broken pre-4.1 hash, which is trivially crackable and replayable.
+    severity: high
+    probe: {type: config, format: mycnf, section: mysqld, key: old-passwords, default: "0"}
+    expect: ["value in 0,off,false"]
+    remediation: Remove old_passwords, then reset the passwords of affected accounts so they get a modern hash.
+    fix: "grep -rn old.passwords /etc/my.cnf /etc/my.cnf.d /etc/mysql"
+    references: [https://mariadb.com/kb/en/server-system-variables/#old_passwords]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\n"}}
+      fail: {files: {/etc/my.cnf: "[mysqld]\nold_passwords=1\n"}}
+
+  - id: mysql:skip-ssl
+    title: TLS is disabled for client connections
+    description: skip-ssl (or ssl=0) turns off TLS, so passwords and query data cross the network in the clear for every remote client.
+    severity: medium
+    probe: {type: config, format: mycnf, section: mysqld, keys: [skip-ssl, ssl]}
+    expect: ["set eq false", "ssl not_in 0,off,false"]
+    evidence: "{file}: TLS disabled (skip-ssl / ssl=0)"
+    remediation: Remove skip-ssl / ssl=0 and configure ssl_cert/ssl_key (MySQL 8 auto-generates certificates).
+    fix: "grep -rnE 'skip.ssl|^ssl *= *0' /etc/my.cnf /etc/my.cnf.d /etc/mysql"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/using-encrypted-connections.html]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\nssl_cert=/etc/mysql/server.pem\n"}}
+      fail: [{files: {/etc/my.cnf: "[mysqld]\nskip-ssl\n"}}, {files: {/etc/my.cnf: "[mysqld]\nssl=0\n"}}]
+
+  - id: mysql:require-secure-transport
+    title: Remote clients may connect without TLS
+    description: The server listens beyond loopback but require_secure_transport is off, so clients can (and older ones will) authenticate in plaintext.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: config, format: mycnf, section: mysqld, keys: [require-secure-transport, bind-address, skip-networking], default: "OFF"}
+    where: ["bind_address not_regex ^\\s*(127\\.0\\.0\\.1|localhost|::1)\\s*$", "skip_networking not_in on,1,true"]
+    expect: ["value in on,1,true"]
+    remediation: Set require_secure_transport=ON once all clients support TLS.
+    fix: "printf '[mysqld]\\nrequire_secure_transport=ON\\n' > /etc/my.cnf.d/60-lync.cnf"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html#sysvar_require_secure_transport]
+    tests:
+      pass:
+        - {files: {/etc/my.cnf: "[mysqld]\nbind-address=0.0.0.0\nrequire_secure_transport=ON\n"}}
+        - {files: {/etc/my.cnf: "[mysqld]\nbind-address=127.0.0.1\n"}}
+      fail: {files: {/etc/my.cnf: "[mysqld]\nbind-address=0.0.0.0\n"}}
+
+  - id: mysql:tls-legacy-versions
+    title: Server allows TLS 1.0/1.1
+    description: tls_version includes TLSv1 or TLSv1.1, deprecated protocols with known weaknesses (RFC 8996).
+    severity: medium
+    probe: {type: config, format: mycnf, section: mysqld, key: tls-version}
+    where: [set eq true]
+    expect: ["value not_regex (?i)tlsv1(\\.1)?(,|$)"]
+    remediation: Restrict tls_version to TLSv1.2,TLSv1.3.
+    fix: "printf '[mysqld]\\ntls_version=TLSv1.2,TLSv1.3\\n' > /etc/my.cnf.d/60-lync.cnf"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/encrypted-connection-protocols-ciphers.html, https://www.rfc-editor.org/rfc/rfc8996]
+    tests:
+      pass: [{files: {/etc/my.cnf: "[mysqld]\ntls_version=TLSv1.2,TLSv1.3\n"}}, {files: {/etc/my.cnf: "[mysqld]\n"}}]
+      fail: {files: {/etc/my.cnf: "[mysqld]\ntls_version=TLSv1,TLSv1.1,TLSv1.2\n"}}
+
+  - id: mysql:native-password-default
+    title: Default authentication plugin is mysql_native_password
+    description: mysql_native_password uses unsalted SHA1 and is deprecated in MySQL 8.0 and disabled by default in 8.4; caching_sha2_password is the secure default.
+    severity: low
+    level: strict
+    probe: {type: config, format: mycnf, section: mysqld, key: default-authentication-plugin}
+    where: [set eq true]
+    expect: [value ne mysql_native_password]
+    remediation: Remove default_authentication_plugin=mysql_native_password and migrate accounts to caching_sha2_password.
+    fix: "grep -rn default.authentication.plugin /etc/my.cnf /etc/my.cnf.d /etc/mysql"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/caching-sha2-pluggable-authentication.html]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\ndefault_authentication_plugin=caching_sha2_password\n"}}
+      fail: {files: {/etc/my.cnf: "[mysqld]\ndefault-authentication-plugin=mysql_native_password\n"}}
+
+  - id: mysql:allow-suspicious-udfs
+    title: allow-suspicious-udfs is enabled
+    description: This lets CREATE FUNCTION load any shared-library symbol as a UDF, making it easier to turn database write access into code execution as the server user.
+    severity: medium
+    probe: {type: config, format: mycnf, section: mysqld, key: allow-suspicious-udfs, default: "0"}
+    expect: ["value in 0,off,false"]
+    remediation: Remove allow-suspicious-udfs.
+    fix: "grep -rn allow.suspicious.udfs /etc/my.cnf /etc/my.cnf.d /etc/mysql"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/server-options.html#option_mysqld_allow-suspicious-udfs]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\n"}}
+      fail: {files: {/etc/my.cnf: "[mysqld]\nallow-suspicious-udfs\n"}}
+
+  - id: mysql:config-user-root
+    title: MySQL is configured to run as root
+    description: user=root makes the server process root, so any FILE/UDF/plugin abuse becomes full host compromise.
+    severity: high
+    tags: [cis]
+    probe: {type: config, format: mycnf, section: mysqld, key: user}
+    expect: [value ne root]
+    remediation: Run the server as the unprivileged mysql user.
+    fix: "printf '[mysqld]\\nuser=mysql\\n' > /etc/my.cnf.d/60-lync.cnf && chown -R mysql:mysql /var/lib/mysql"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/changing-mysql-user.html]
+    tests:
+      pass: [{files: {/etc/my.cnf: "[mysqld]\nuser=mysql\n"}}, {files: {/etc/my.cnf: "[mysqld]\n"}}]
+      fail: {files: {/etc/my.cnf: "[mysqld]\nuser=root\n"}}
+
+  - id: mysql:process-root
+    title: MySQL server process runs as root
+    description: A mysqld/mariadbd process with UID 0 turns any SQL-level code execution (UDFs, INTO OUTFILE) into root on the host.
+    severity: high
+    probe: {type: process, process: "^(mysqld|mariadbd)$"}
+    expect: [uid ne 0]
+    remediation: Start the server as the mysql user (user=mysql in [mysqld]; the packaged systemd unit already does this).
+    fix: "systemctl cat mysqld mariadb 2>/dev/null | grep -i '^User='"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/changing-mysql-user.html]
+    tests:
+      pass: {files: {/proc/41/comm: "mariadbd\n", /proc/41/status: "Name:\tmariadbd\nUid:\t27\t27\t27\t27\n"}}
+      fail: {files: {/proc/41/comm: "mysqld\n", /proc/41/status: "Name:\tmysqld\nUid:\t0\t0\t0\t0\n"}}
+
+  - id: mysql:user-mycnf-readable
+    title: A user's ~/.my.cnf (client credentials) is readable by others
+    description: ~/.my.cnf normally holds a MySQL user and password for the client; group- or world-readable it hands that account to other local users.
+    severity: high
+    probe: {type: content, path: [/root/.my.cnf, /home/*/.my.cnf], regex: "^\\s*password\\s*=", secret: true}
+    where: [match eq true]
+    expect: [mode bits_none 0044]
+    evidence: "{path} contains a password and has mode {mode}"
+    remediation: Make the file readable by its owner only.
+    fix: "chmod 600 {path}"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/option-files.html]
+    tests:
+      pass: {files: {/root/.my.cnf: "[client]\nuser=root\npassword=lync-test-secret\n"}, meta: {/root/.my.cnf: "0600 0 0"}}
+      fail: {files: {/home/app/.my.cnf: "[client]\npassword=lync-test-secret\n"}, meta: {/home/app/.my.cnf: "0644 1000 1000"}}
+
+  - id: mysql:history-file
+    title: MySQL client history file is kept
+    description: ~/.mysql_history records every statement typed in the client, including CREATE USER ... IDENTIFIED BY with plaintext passwords.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: file, path: [/root/.mysql_history, /home/*/.mysql_history]}
+    where: [type eq file]
+    expect_none: true
+    evidence: "{path} exists"
+    remediation: Delete the history file and link it to /dev/null (or export MYSQL_HISTFILE=/dev/null).
+    fix: "rm -f {path} && ln -s /dev/null {path}"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/mysql-logging.html]
+    tests:
+      pass: {files: {/root/.bash_history: "ls\n"}}
+      fail: {files: {/root/.mysql_history: "select 1;\n"}, meta: {/root/.mysql_history: "0600 0 0"}}
+
+  - id: mysql:debian-cnf-perms
+    title: /etc/mysql/debian.cnf is readable by non-root users
+    description: debian.cnf holds the password of the debian-sys-maint (or root socket) maintenance account, which has full privileges.
+    severity: high
+    probe: {type: file, path: /etc/mysql/debian.cnf}
+    expect: [mode perm_max 0600]
+    remediation: Restrict the file to root.
+    fix: "chown root:root /etc/mysql/debian.cnf && chmod 600 /etc/mysql/debian.cnf"
+    references: [https://mariadb.com/kb/en/differences-in-mariadb-in-debian-and-ubuntu/]
+    tests:
+      pass: {files: {/etc/mysql/debian.cnf: "[client]\n"}, meta: {/etc/mysql/debian.cnf: "0600 0 0"}}
+      fail: {files: {/etc/mysql/debian.cnf: "[client]\n"}, meta: {/etc/mysql/debian.cnf: "0644 0 0"}}
+
+  - id: mysql:config-writable
+    title: MySQL configuration file is writable by non-root users
+    description: Whoever can edit my.cnf can set user=root, init-file or plugin-load and get code execution when the server restarts.
+    severity: high
+    probe: {type: file, path: [/etc/my.cnf, /etc/my.cnf.d/*.cnf, /etc/mysql/my.cnf, /etc/mysql/conf.d/*.cnf, /etc/mysql/mariadb.conf.d/*.cnf, /etc/mysql/mysql.conf.d/*.cnf]}
+    expect: [mode bits_none 0022]
+    remediation: Make configuration files owned by root and writable only by root.
+    fix: "chown root:root {path} && chmod 644 {path}"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/option-files.html]
+    tests:
+      pass: {files: {/etc/my.cnf: "[mysqld]\n"}, meta: {/etc/my.cnf: "0644 0 0"}}
+      fail: {files: {/etc/my.cnf.d/server.cnf: "[mysqld]\n"}, meta: {/etc/my.cnf.d/server.cnf: "0666 0 0"}}
+
+  - id: mysql:datadir-world-writable
+    title: MySQL data directory is world-writable
+    description: A world-writable data directory lets any local user replace table, log or plugin files the server will load.
+    severity: high
+    probe: {type: file, path: [/var/lib/mysql, /var/lib/mariadb]}
+    expect: [mode bits_none 0002]
+    remediation: Restore ownership and permissions of the data directory.
+    fix: "chown mysql:mysql {path} && chmod 750 {path}"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/data-directory.html]
+    tests:
+      pass: {meta: {/var/lib/mysql: "d0751 27 27"}}
+      fail: {meta: {/var/lib/mysql: "d0777 27 27"}}
+
+  - id: mysql:datadir-world-readable
+    title: MySQL data directory is accessible to all users
+    description: CIS recommends a 750 (or stricter) data directory so other local users cannot list or read table, binlog and relay-log files.
+    severity: low
+    level: strict
+    tags: [cis]
+    probe: {type: file, path: [/var/lib/mysql, /var/lib/mariadb]}
+    expect: [mode bits_none 0007]
+    remediation: Remove all access for other users.
+    fix: "chmod o-rwx {path}"
+    references: [https://dev.mysql.com/doc/refman/8.4/en/data-directory.html]
+    tests:
+      pass: {meta: {/var/lib/mysql: "d0750 27 27"}}
+      fail: {meta: {/var/lib/mysql: "d0755 27 27"}}
+
+  - id: mysql:eol-community
+    title: Oracle MySQL Community Server version is end-of-life
+    description: MySQL 5.x, 8.0 (EOL April 2026) and the 8.1-8.3 innovation releases no longer receive security fixes from Oracle. Distribution-patched builds are not covered by this check.
+    severity: high
+    applies_if: {package: mysql-community-server}
+    probe: {type: package, name: mysql-community-server}
+    expect: ["upstream not_regex ^(5\\.|8\\.[0-3]\\.)"]
+    remediation: Upgrade to a supported MySQL release (8.4 LTS or 9.x).
+    fix: "Upgrade from the MySQL 8.4 LTS repository (dnf/apt install mysql-community-server after switching mysql-8.4-lts repos)"
+    references: [https://www.oracle.com/us/support/library/lifetime-support-technology-069183.pdf, https://endoflife.date/mysql]
+    tests:
+      pass: {packages: {mysql-community-server: 8.4.3-1.el9}}
+      fail: [{packages: {mysql-community-server: 8.0.39-1.el9}}, {packages: {mysql-community-server: 5.7.44-1.el7}}]
+      na: {packages: {mariadb-server: 10.5.22-1.el9}}
+
+  - id: mariadb:eol-upstream
+    title: Upstream MariaDB server version is end-of-life
+    description: MariaDB Foundation builds (MariaDB-server package) older than 10.11 LTS, and the 11.0-11.3 short-term releases, no longer receive security fixes. Distribution-patched mariadb-server packages are not covered.
+    severity: high
+    applies_if: {package: MariaDB-server}
+    probe: {type: package, name: MariaDB-server}
+    expect: ["upstream not_regex ^(5\\.|10\\.([0-9]|10)\\.|11\\.[0-3]\\.)"]
+    remediation: Upgrade to a supported MariaDB release (10.11 or 11.4 LTS).
+    fix: "Switch the MariaDB repository to 11.4 and run your package manager's upgrade"
+    references: [https://mariadb.org/about/#maintenance-policy, https://endoflife.date/mariadb]
+    tests:
+      pass: [{packages: {MariaDB-server: 10.11.9-1.el9}}, {packages: {MariaDB-server: 11.4.3-1.el9}}]
+      fail: [{packages: {MariaDB-server: 10.6.19-1.el9}}, {packages: {MariaDB-server: 11.2.5-1.el9}}]
+      na: {packages: {mariadb-server: 10.5.22-1.el9}}

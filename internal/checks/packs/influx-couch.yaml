@@ -1,0 +1,66 @@
+pack: influxdb-cassandra
+title: InfluxDB 1.x and Apache Cassandra
+description: Authentication and transport settings of InfluxDB 1.x (influxdb.conf) and Apache Cassandra (cassandra.yaml), both of which ship with authentication disabled.
+category: config
+applies_if:
+  file: [/etc/influxdb/influxdb.conf, /etc/cassandra/cassandra.yaml, /etc/cassandra/conf/cassandra.yaml]
+references:
+  - https://docs.influxdata.com/influxdb/v1/administration/authentication_and_authorization/
+  - https://cassandra.apache.org/doc/latest/cassandra/managing/operating/security.html
+checks:
+  - id: influxdb:auth-disabled
+    title: InfluxDB 1.x HTTP authentication is disabled
+    description: InfluxDB 1.x defaults to auth-enabled = false, so anyone who reaches port 8086 can query, write and drop databases.
+    severity: high
+    applies_if: {file: /etc/influxdb/influxdb.conf}
+    probe: {type: config, format: ini, path: /etc/influxdb/influxdb.conf, section: http, key: auth-enabled, default: "false"}
+    expect: [value eq true]
+    remediation: Create an admin user, then set auth-enabled = true in the [http] section and restart InfluxDB.
+    fix: "Set 'auth-enabled = true' under [http] in /etc/influxdb/influxdb.conf; systemctl restart influxdb"
+    tests:
+      pass: {files: {/etc/influxdb/influxdb.conf: "[http]\n  enabled = true\n  auth-enabled = true\n"}}
+      fail: {files: {/etc/influxdb/influxdb.conf: "[http]\n  enabled = true\n"}}
+      na: {files: {/etc/cassandra/cassandra.yaml: "cluster_name: x\n"}}
+
+  - id: cassandra:authenticator-allowall
+    title: Cassandra authentication is disabled (AllowAllAuthenticator)
+    description: The default AllowAllAuthenticator accepts every client without credentials on the CQL port.
+    severity: high
+    applies_if: {file: [/etc/cassandra/cassandra.yaml, /etc/cassandra/conf/cassandra.yaml]}
+    probe: {type: config, format: yaml, path: [/etc/cassandra/cassandra.yaml, /etc/cassandra/conf/cassandra.yaml], key: authenticator, default: AllowAllAuthenticator}
+    expect: [value not_regex AllowAllAuthenticator]
+    remediation: Use PasswordAuthenticator, raise system_auth replication and replace the default cassandra superuser.
+    fix: "Set 'authenticator: PasswordAuthenticator' in cassandra.yaml and restart each node"
+    references: [https://cassandra.apache.org/doc/latest/cassandra/managing/operating/security.html#authentication]
+    tests:
+      pass: {files: {/etc/cassandra/cassandra.yaml: "authenticator: PasswordAuthenticator\n"}}
+      fail: [{files: {/etc/cassandra/cassandra.yaml: "cluster_name: x\n"}}, {files: {/etc/cassandra/conf/cassandra.yaml: "authenticator: AllowAllAuthenticator\n"}}]
+
+  - id: cassandra:authorizer-allowall
+    title: Cassandra authorization is disabled (AllowAllAuthorizer)
+    description: With AllowAllAuthorizer every authenticated user can read and modify every keyspace.
+    severity: medium
+    applies_if: {file: [/etc/cassandra/cassandra.yaml, /etc/cassandra/conf/cassandra.yaml]}
+    probe: {type: config, format: yaml, path: [/etc/cassandra/cassandra.yaml, /etc/cassandra/conf/cassandra.yaml], key: authorizer, default: AllowAllAuthorizer}
+    expect: [value not_regex AllowAllAuthorizer]
+    remediation: Use CassandraAuthorizer and grant roles least privilege.
+    fix: "Set 'authorizer: CassandraAuthorizer' in cassandra.yaml and restart each node"
+    references: [https://cassandra.apache.org/doc/latest/cassandra/managing/operating/security.html#authorization]
+    tests:
+      pass: {files: {/etc/cassandra/cassandra.yaml: "authorizer: CassandraAuthorizer\n"}}
+      fail: {files: {/etc/cassandra/cassandra.yaml: "authenticator: PasswordAuthenticator\n"}}
+
+  - id: cassandra:client-encryption
+    title: Cassandra client connections are not encrypted
+    description: client_encryption_options.enabled is false, so CQL credentials and data travel in clear text.
+    severity: low
+    level: strict
+    applies_if: {file: [/etc/cassandra/cassandra.yaml, /etc/cassandra/conf/cassandra.yaml]}
+    probe: {type: config, format: yaml, path: [/etc/cassandra/cassandra.yaml, /etc/cassandra/conf/cassandra.yaml], key: client_encryption_options.enabled, default: "false"}
+    expect: [value eq true]
+    remediation: Enable client_encryption_options with a keystore.
+    fix: "Set client_encryption_options.enabled: true and keystore settings in cassandra.yaml"
+    references: [https://cassandra.apache.org/doc/latest/cassandra/managing/operating/security.html#tls-ssl-encryption]
+    tests:
+      pass: {files: {/etc/cassandra/cassandra.yaml: "client_encryption_options:\n  enabled: true\n"}}
+      fail: {files: {/etc/cassandra/cassandra.yaml: "client_encryption_options:\n  enabled: false\n"}}

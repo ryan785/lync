@@ -1,0 +1,41 @@
+pack: memcached
+title: Memcached
+description: Listen address and UDP settings of Memcached from /etc/memcached.conf (Debian/Ubuntu) or /etc/sysconfig/memcached (RHEL family). Memcached has no authentication by default.
+category: config
+applies_if:
+  file: [/etc/memcached.conf, /etc/sysconfig/memcached]
+references:
+  - https://github.com/memcached/memcached/wiki/ConfiguringServer
+checks:
+  - id: memcached:listen-not-local
+    title: Memcached is not restricted to loopback
+    description: Without -l 127.0.0.1 (or ::1) memcached listens on every interface and anyone who reaches port 11211 can read, change or flush cached data (sessions, tokens) with no authentication.
+    severity: medium
+    probe: {type: content, path: [/etc/memcached.conf, /etc/sysconfig/memcached], regex: "^[^#\\n]*(-l|--listen)[ =]*\"?(127\\.0\\.0\\.1|localhost|::1|\\[::1\\])"}
+    expect: [match eq true]
+    evidence: "{path}: no -l 127.0.0.1 / ::1 listen restriction"
+    remediation: Bind memcached to loopback (or a private address protected by a firewall).
+    fix: "Debian: set '-l 127.0.0.1' in /etc/memcached.conf; RHEL: OPTIONS=\"-l 127.0.0.1,::1 -U 0\" in /etc/sysconfig/memcached; restart memcached"
+    tests:
+      pass:
+        - {files: {/etc/memcached.conf: "-m 64\n-p 11211\n-l 127.0.0.1\n"}}
+        - {files: {/etc/sysconfig/memcached: "PORT=\"11211\"\nOPTIONS=\"-l 127.0.0.1,::1\"\n"}}
+      fail:
+        - {files: {/etc/memcached.conf: "-m 64\n# -l 127.0.0.1\n"}}
+        - {files: {/etc/sysconfig/memcached: "OPTIONS=\"\"\n"}}
+      na: {files: {/etc/other.conf: ""}}
+
+  - id: memcached:udp-enabled
+    title: Memcached UDP listener is enabled
+    description: Memcached over UDP was abused for record-size DDoS amplification (CVE-2018-1000115, up to 50000x). It has been off by default since 1.5.6; an explicit -U port re-enables it.
+    severity: high
+    probe: {type: content, path: [/etc/memcached.conf, /etc/sysconfig/memcached], regex: "^[^#\\n]*(-U|--udp-port)[ =]*\"?[1-9]"}
+    where: [match eq true]
+    expect_none: true
+    evidence: "{path}: UDP port enabled ({line})"
+    remediation: Disable UDP with -U 0.
+    fix: "Replace the -U option with '-U 0' and restart memcached"
+    references: [https://nvd.nist.gov/vuln/detail/CVE-2018-1000115]
+    tests:
+      pass: [{files: {/etc/memcached.conf: "-l 127.0.0.1\n-U 0\n"}}, {files: {/etc/memcached.conf: "-l 127.0.0.1\n"}}]
+      fail: {files: {/etc/sysconfig/memcached: "OPTIONS=\"-l 0.0.0.0 -U 11211\"\n"}}

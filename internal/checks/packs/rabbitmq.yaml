@@ -1,0 +1,83 @@
+pack: rabbitmq
+title: RabbitMQ
+description: RabbitMQ broker configuration (rabbitmq.conf, classic rabbitmq.config, conf.d) and the Erlang distribution cookie.
+category: config
+applies_if:
+  file: [/etc/rabbitmq/rabbitmq.conf, /etc/rabbitmq/rabbitmq.config, /usr/sbin/rabbitmq-server, /usr/lib/rabbitmq/bin/rabbitmq-server]
+references:
+  - https://www.rabbitmq.com/docs/production-checklist
+test_base:
+  files: {/usr/sbin/rabbitmq-server: ""}
+checks:
+  - id: rabbitmq:guest-remote
+    title: RabbitMQ guest account may log in remotely
+    description: Clearing loopback_users lets the default guest/guest administrator log in from the network, unless the guest user was deleted or its password changed.
+    severity: high
+    probe: {type: content, path: [/etc/rabbitmq/rabbitmq.conf, /etc/rabbitmq/rabbitmq.config, /etc/rabbitmq/conf.d/*.conf], regex: "^\\s*loopback_users(\\.guest)?\\s*=\\s*(false|none)\\b|\\{\\s*loopback_users\\s*,\\s*\\[\\s*\\]\\s*\\}"}
+    where: [match eq true]
+    expect_none: true
+    evidence: "{path}: guest is not restricted to loopback ({line})"
+    remediation: Restore the loopback restriction and delete the guest user (rabbitmqctl delete_user guest); create named administrators instead.
+    fix: "Remove the loopback_users override from {path}; rabbitmqctl delete_user guest"
+    references: [https://www.rabbitmq.com/docs/access-control#loopback-users]
+    tests:
+      pass: {files: {/etc/rabbitmq/rabbitmq.conf: "listeners.tcp.default = 5672\n"}}
+      fail:
+        - {files: {/etc/rabbitmq/rabbitmq.conf: "loopback_users.guest = false\n"}}
+        - {files: {/etc/rabbitmq/rabbitmq.config: "[{rabbit, [{loopback_users, []}]}].\n"}}
+      na: {files: {/usr/sbin/rabbitmq-server: "!absent", /etc/rabbitmq/x: ""}}
+
+  - id: rabbitmq:erlang-cookie-perms
+    title: Erlang cookie is readable by other users
+    description: The .erlang.cookie is the shared secret for Erlang distribution; anyone who reads it can connect to the node (rabbitmqctl) and execute arbitrary code as the rabbitmq user.
+    severity: high
+    probe: {type: file, path: [/var/lib/rabbitmq/.erlang.cookie, /root/.erlang.cookie]}
+    expect: [mode perm_max 0600]
+    remediation: Restrict the cookie to its owner.
+    fix: "chmod 400 {path}"
+    references: [https://www.rabbitmq.com/docs/cli#erlang-cookie]
+    tests:
+      pass: {files: {/var/lib/rabbitmq/.erlang.cookie: "x"}, meta: {/var/lib/rabbitmq/.erlang.cookie: "0400 975 975"}}
+      fail: {files: {/var/lib/rabbitmq/.erlang.cookie: "x"}, meta: {/var/lib/rabbitmq/.erlang.cookie: "0644 975 975"}}
+
+  - id: rabbitmq:config-readable-secret
+    title: RabbitMQ config with passwords is readable by all users
+    description: rabbitmq.conf can carry default_pass, LDAP or TLS key passwords in plaintext; world-readable, any local user can reuse them.
+    severity: high
+    probe: {type: content, path: [/etc/rabbitmq/rabbitmq.conf, /etc/rabbitmq/conf.d/*.conf], regex: "(?i)^\\s*[a-z0-9_.]*(default_pass|password)\\s*=\\s*\\S", secret: true}
+    where: [match eq true]
+    expect: [mode bits_none 0004]
+    evidence: "{path} contains a password setting and has mode {mode}"
+    remediation: Make the file readable only by root and the rabbitmq group.
+    fix: "chown root:rabbitmq {path} && chmod 640 {path}"
+    references: [https://www.rabbitmq.com/docs/configure#configuration-encryption]
+    tests:
+      pass: {files: {/etc/rabbitmq/rabbitmq.conf: "default_pass = lync-test-secret\n"}, meta: {/etc/rabbitmq/rabbitmq.conf: "0640 0 975"}}
+      fail: {files: {/etc/rabbitmq/rabbitmq.conf: "default_pass = lync-test-secret\n"}, meta: {/etc/rabbitmq/rabbitmq.conf: "0644 0 975"}}
+
+  - id: rabbitmq:tls-legacy
+    title: RabbitMQ allows TLS 1.0/1.1
+    description: ssl_options.versions lists tlsv1 or tlsv1.1, deprecated protocols (RFC 8996).
+    severity: medium
+    probe: {type: content, path: [/etc/rabbitmq/rabbitmq.conf, /etc/rabbitmq/conf.d/*.conf], regex: "(?i)^\\s*(ssl_options|management\\.ssl)\\.versions\\.\\d+\\s*=\\s*tlsv1(\\.1)?\\s*$"}
+    where: [match eq true]
+    expect_none: true
+    evidence: "{path}: {line}"
+    remediation: Allow only tlsv1.2 and tlsv1.3.
+    fix: "Remove the tlsv1/tlsv1.1 ssl_options.versions entries from {path}"
+    references: [https://www.rabbitmq.com/docs/ssl#tls-versions]
+    tests:
+      pass: {files: {/etc/rabbitmq/rabbitmq.conf: "ssl_options.versions.1 = tlsv1.2\n"}}
+      fail: {files: {/etc/rabbitmq/rabbitmq.conf: "ssl_options.versions.1 = tlsv1.2\nssl_options.versions.2 = tlsv1.1\n"}}
+
+  - id: rabbitmq:config-writable
+    title: RabbitMQ configuration is writable by other users
+    description: Whoever can edit the broker config can re-enable guest or change listeners at the next restart.
+    severity: high
+    probe: {type: file, path: [/etc/rabbitmq/rabbitmq.conf, /etc/rabbitmq/rabbitmq.config, /etc/rabbitmq/advanced.config, /etc/rabbitmq/rabbitmq-env.conf]}
+    expect: [mode bits_none 0022]
+    remediation: Make the files writable only by root.
+    fix: "chmod go-w {path}"
+    tests:
+      pass: {files: {/etc/rabbitmq/rabbitmq.conf: "\n"}, meta: {/etc/rabbitmq/rabbitmq.conf: "0640 0 975"}}
+      fail: {files: {/etc/rabbitmq/rabbitmq.conf: "\n"}, meta: {/etc/rabbitmq/rabbitmq.conf: "0666 0 975"}}

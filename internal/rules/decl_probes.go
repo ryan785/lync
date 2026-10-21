@@ -89,7 +89,7 @@ var allowedCmds = []struct {
 	{[]string{"ufw", "status", "verbose"}, false},
 	{[]string{"firewall-cmd", "--state"}, false}, {[]string{"firewall-cmd", "--get-default-zone"}, false},
 	{[]string{"firewall-cmd", "--list-all"}, false}, {[]string{"firewall-cmd", "--get-active-zones"}, false},
-	{[]string{"getenforce"}, false}, {[]string{"sestatus"}, false},
+	{[]string{"getenforce"}, false}, {[]string{"sestatus"}, false}, {[]string{"getsebool", "-a"}, false},
 	{[]string{"aa-status"}, false}, {[]string{"apparmor_status"}, false},
 	{[]string{"docker", "ps", "-q"}, false}, {[]string{"docker", "inspect"}, true}, {[]string{"docker", "info", "--format", "{{json .}}"}, false},
 	{[]string{"podman", "ps", "-q"}, false}, {[]string{"podman", "inspect"}, true},
@@ -430,6 +430,9 @@ func (env *evalEnv) probeContent(p *Probe) probeOut {
 		}
 		locs := p.re.FindAllStringIndex(src, 1000)
 		o := obs{"path": pth, "match": boolStr(len(locs) > 0), "count": strconv.Itoa(len(locs)), fLoc: pth}
+		if m, _, err := env.h.StatFollow(pth); err == nil {
+			env.metaObs(o, m) // lets a check combine "contains X" with "is world-readable"
+		}
 		if len(locs) > 0 {
 			ln := strings.Count(src[:locs[0][0]], "\n") + 1
 			start := strings.LastIndexByte(src[:locs[0][0]], '\n') + 1
@@ -770,7 +773,7 @@ func (env *evalEnv) probePackage(p *Probe) probeOut {
 		for _, pat := range p.Name {
 			if ok, _ := path.Match(pat, pk.Name); ok && !seen[pk.Name] {
 				seen[pk.Name] = true
-				out = append(out, obs{"name": pk.Name, "version": pk.NEVR()[len(pk.Name)+1:], "upstream": pk.Version, fKey: pk.Name, fLoc: "package " + pk.NEVRA()})
+				out = append(out, obs{"name": pk.Name, "version": pk.NEVR(), "upstream": pk.Version, fKey: pk.Name, fLoc: "package " + pk.NEVRA()})
 			}
 		}
 	}

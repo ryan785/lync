@@ -1,0 +1,111 @@
+pack: mongodb
+title: MongoDB
+description: mongod.conf (YAML) access control, network binding and TLS, plus file permissions, process user and version of MongoDB servers.
+category: config
+applies_if:
+  file: [/etc/mongod.conf, /usr/bin/mongod]
+references:
+  - https://www.mongodb.com/docs/manual/administration/security-checklist/
+checks:
+  - id: mongodb:authorization-disabled
+    title: MongoDB access control is not enabled
+    description: Without security.authorization (or a replica-set keyFile, which implies it) any client that can connect can read, modify or drop every database. Unauthenticated MongoDB instances are mass-ransomed on the Internet.
+    severity: high
+    level: basic
+    probe: {type: config, format: yaml, path: /etc/mongod.conf, keys: [security.authorization, security.keyFile, net.bindIp, net.bindIpAll], default: disabled}
+    expect: ["value eq enabled || security.keyFile not_empty"]
+    severity_if:
+      - {when: "net.bindIpAll eq true || net.bindIp regex (^|,)\\s*(0\\.0\\.0\\.0|::|\\*)\\s*(,|$)", severity: critical}
+    remediation: Create an admin user, then set security.authorization enabled and restart mongod.
+    fix: "Add 'security:\\n  authorization: enabled' to /etc/mongod.conf and systemctl restart mongod"
+    references: [https://www.mongodb.com/docs/manual/tutorial/enable-authentication/]
+    tests:
+      pass:
+        - {files: {/etc/mongod.conf: "net:\n  bindIp: 127.0.0.1\nsecurity:\n  authorization: enabled\n"}}
+        - {files: {/etc/mongod.conf: "security:\n  keyFile: /etc/mongo.key\n"}}
+      fail:
+        - {files: {/etc/mongod.conf: "net:\n  port: 27017\n  bindIp: 127.0.0.1\n"}}
+        - {name: public, files: {/etc/mongod.conf: "net:\n  bindIpAll: true\n"}, severity: critical}
+      na: {files: {/etc/other.conf: ""}}
+
+  - id: mongodb:bind-all
+    title: MongoDB is configured to listen on all interfaces
+    description: net.bindIpAll or a bindIp of 0.0.0.0 (or the IPv6 any-address) accepts connections on every interface; since 3.6 the default is localhost only.
+    severity: medium
+    probe: {type: config, format: yaml, path: /etc/mongod.conf, keys: [net.bindIp, net.bindIpAll], default: 127.0.0.1}
+    expect: ["value not_regex (^|,)\\s*(0\\.0\\.0\\.0|::|\\*)\\s*(,|$)", "net.bindIpAll ne true"]
+    remediation: Bind to localhost plus the specific private addresses clients use, and firewall port 27017.
+    fix: "Set net.bindIp: 127.0.0.1,<private-ip> in /etc/mongod.conf and restart mongod"
+    references: [https://www.mongodb.com/docs/manual/core/security-mongodb-configuration/]
+    tests:
+      pass: {files: {/etc/mongod.conf: "net:\n  bindIp: 127.0.0.1,10.0.0.4\n"}}
+      fail: [{files: {/etc/mongod.conf: "net:\n  bindIp: 0.0.0.0\n"}}, {files: {/etc/mongod.conf: "net:\n  bindIpAll: true\n"}}]
+
+  - id: mongodb:tls-disabled-remote
+    title: MongoDB accepts remote connections without TLS
+    description: The server binds beyond loopback but net.tls.mode is not requireTLS, so credentials (SCRAM is protected, but data is not) and all documents cross the network in clear text.
+    severity: medium
+    probe: {type: config, format: yaml, path: /etc/mongod.conf, keys: [net.tls.mode, net.ssl.mode, net.bindIp, net.bindIpAll], default: disabled}
+    where: ["net.bindIpAll eq true || net.bindIp not_regex ^\\s*(127\\.0\\.0\\.1|localhost|::1)?(\\s*,\\s*(127\\.0\\.0\\.1|localhost|::1))*\\s*$"]
+    expect: ["value eq requireTLS || net.ssl.mode eq requireSSL"]
+    remediation: Configure net.tls.mode requireTLS with a certificate.
+    fix: "Set net.tls.mode: requireTLS and net.tls.certificateKeyFile in /etc/mongod.conf"
+    references: [https://www.mongodb.com/docs/manual/tutorial/configure-ssl/]
+    tests:
+      pass:
+        - {files: {/etc/mongod.conf: "net:\n  bindIp: 0.0.0.0\n  tls:\n    mode: requireTLS\n"}}
+        - {files: {/etc/mongod.conf: "net:\n  bindIp: 127.0.0.1\n"}}
+      fail: {files: {/etc/mongod.conf: "net:\n  bindIp: 10.0.0.4\n"}}
+
+  - id: mongodb:javascript-enabled
+    title: Server-side JavaScript is enabled
+    description: $where, mapReduce and $function execute JavaScript on the server, widening the impact of NoSQL injection.
+    severity: low
+    level: strict
+    probe: {type: config, format: yaml, path: /etc/mongod.conf, key: security.javascriptEnabled, default: "true"}
+    expect: [value eq false]
+    remediation: Set security.javascriptEnabled false if applications don't use server-side JavaScript.
+    fix: "Add 'security:\\n  javascriptEnabled: false' to /etc/mongod.conf"
+    references: [https://www.mongodb.com/docs/manual/core/server-side-javascript/]
+    tests:
+      pass: {files: {/etc/mongod.conf: "security:\n  javascriptEnabled: false\n"}}
+      fail: {files: {/etc/mongod.conf: "net:\n  port: 27017\n"}}
+
+  - id: mongodb:config-writable
+    title: mongod.conf is writable by other users
+    description: Whoever can edit mongod.conf can disable authorization at the next restart.
+    severity: high
+    probe: {type: file, path: /etc/mongod.conf}
+    expect: [mode bits_none 0022]
+    remediation: Make the config writable only by root.
+    fix: "chown root:root /etc/mongod.conf && chmod 644 /etc/mongod.conf"
+    tests:
+      pass: {files: {/etc/mongod.conf: "\n"}, meta: {/etc/mongod.conf: "0644 0 0"}}
+      fail: {files: {/etc/mongod.conf: "\n"}, meta: {/etc/mongod.conf: "0666 0 0"}}
+
+  - id: mongodb:process-root
+    title: mongod runs as root
+    description: Running mongod as root turns any server compromise into full host compromise; the packages run it as the mongod/mongodb user.
+    severity: medium
+    probe: {type: process, process: "^mongod$"}
+    expect: [uid ne 0]
+    remediation: Run mongod as the dedicated mongod user.
+    fix: "systemctl cat mongod | grep -i '^User='"
+    references: [https://www.mongodb.com/docs/manual/administration/security-checklist/]
+    tests:
+      pass: {files: {/etc/mongod.conf: "\n", /proc/9/comm: "mongod\n", /proc/9/status: "Uid:\t995\t995\t995\t995\n"}}
+      fail: {files: {/etc/mongod.conf: "\n", /proc/9/comm: "mongod\n", /proc/9/status: "Uid:\t0\t0\t0\t0\n"}}
+
+  - id: mongodb:eol
+    title: MongoDB server version is end-of-life
+    description: MongoDB 6.0 and older no longer receive security fixes (6.0 ended July 2025).
+    severity: high
+    probe: {type: package, name: mongodb-org-server}
+    expect: [upstream version_ge 7.0]
+    evidence: "mongodb-org-server {upstream} is past end-of-life"
+    remediation: Upgrade to a supported MongoDB release, one major version at a time.
+    fix: "Follow the MongoDB upgrade procedure to 7.0 / 8.0"
+    references: [https://www.mongodb.com/legal/support-policy/lifecycles]
+    tests:
+      pass: {files: {/etc/mongod.conf: "\n"}, packages: {mongodb-org-server: 8.0.3-1.el9}}
+      fail: {files: {/etc/mongod.conf: "\n"}, packages: {mongodb-org-server: 5.0.29-1.el8}}

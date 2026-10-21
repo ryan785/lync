@@ -1,0 +1,145 @@
+pack: redis
+title: Redis / Valkey
+description: redis.conf (per instance, include directives followed) and process hardening for Redis and Valkey. Complements the built-in redis:no-auth and net:datastore-exposed checks.
+category: config
+applies_if:
+  file: [/etc/redis.conf, /etc/redis/redis.conf, /etc/redis/redis-*.conf, /etc/valkey/valkey.conf]
+references:
+  - https://redis.io/docs/latest/operate/oss_and_stack/management/security/
+checks:
+  - id: redis:protected-mode-off
+    title: Redis protected mode is disabled on an instance without a password
+    description: With protected-mode no and no requirepass, Redis answers unauthenticated commands from any address it is bound to; attackers routinely use this to write SSH keys or cron jobs via CONFIG SET.
+    severity: high
+    probe: {type: config, format: redis, path: [/etc/redis.conf, /etc/redis/redis.conf, /etc/redis/redis-*.conf, /etc/valkey/valkey.conf], keys: [protected-mode, requirepass, bind], default: "yes"}
+    where: [requirepass empty]
+    expect: [value eq yes]
+    severity_if:
+      - {when: "bind regex ^\\s*(-?(127\\.0\\.0\\.1|::1|localhost)\\s*)+$", severity: medium}
+    remediation: Set protected-mode yes, bind to loopback or a private address, and configure requirepass or ACL users.
+    fix: "Set 'protected-mode yes' and 'requirepass <strong secret>' in the instance config, then restart redis"
+    tests:
+      pass:
+        - {files: {/etc/redis/redis.conf: "bind 0.0.0.0\n"}}
+        - {files: {/etc/redis/redis.conf: "protected-mode no\nrequirepass lync-test-secret\n"}}
+      fail:
+        - {files: {/etc/redis/redis.conf: "bind 0.0.0.0\nprotected-mode no\n"}}
+        - {name: loopback only, files: {/etc/redis.conf: "bind 127.0.0.1 -::1\nprotected-mode no\n"}, severity: medium}
+      na: {files: {/etc/other.conf: "protected-mode no\n"}}
+
+  - id: redis:bind-all
+    title: Redis is configured to listen on all interfaces
+    description: Without a bind directive (or with bind * / 0.0.0.0) Redis accepts connections on every interface; packaged configs bind 127.0.0.1 by default.
+    severity: medium
+    probe: {type: config, format: redis, path: [/etc/redis.conf, /etc/redis/redis.conf, /etc/redis/redis-*.conf, /etc/valkey/valkey.conf], key: bind, default: "*"}
+    expect: ["value not_regex (^|\\s)-?(\\*|0\\.0\\.0\\.0|::|::\\*)(\\s|$)"]
+    remediation: Bind Redis to 127.0.0.1 (and a private interface only if remote clients need it).
+    fix: "Set 'bind 127.0.0.1 -::1' in {file} and restart redis"
+    references: [https://redis.io/docs/latest/operate/oss_and_stack/management/config-file/]
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "bind 127.0.0.1 -::1\n"}}
+      fail: [{files: {/etc/redis/redis.conf: "port 6379\n"}}, {files: {/etc/redis/redis.conf: "bind * -::*\n"}}]
+
+  - id: redis:debug-command
+    title: Redis DEBUG command is enabled for remote clients
+    description: enable-debug-command yes exposes DEBUG to every authenticated client; it can crash the server, alter internal state and has been used in exploit chains. Redis 7 defaults to no.
+    severity: medium
+    probe: {type: config, format: redis, path: [/etc/redis.conf, /etc/redis/redis.conf, /etc/redis/redis-*.conf, /etc/valkey/valkey.conf], key: enable-debug-command, default: "no"}
+    expect: ["value in no,local"]
+    remediation: Set enable-debug-command no (or local).
+    fix: "Set 'enable-debug-command no' in {file} and restart redis"
+    references: [https://raw.githubusercontent.com/redis/redis/7.2/redis.conf]
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "enable-debug-command local\n"}}
+      fail: {files: {/etc/redis/redis.conf: "enable-debug-command yes\n"}}
+
+  - id: redis:module-command
+    title: Redis MODULE command is enabled for remote clients
+    description: enable-module-command yes lets any authenticated client run MODULE LOAD, i.e. load a shared library into the server, which is code execution as the redis user.
+    severity: high
+    probe: {type: config, format: redis, path: [/etc/redis.conf, /etc/redis/redis.conf, /etc/redis/redis-*.conf, /etc/valkey/valkey.conf], key: enable-module-command, default: "no"}
+    expect: ["value in no,local"]
+    remediation: Set enable-module-command no and load required modules with loadmodule in the config file.
+    fix: "Set 'enable-module-command no' in {file} and restart redis"
+    references: [https://raw.githubusercontent.com/redis/redis/7.2/redis.conf]
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "\n"}}
+      fail: {files: {/etc/redis/redis.conf: "enable-module-command yes\n"}}
+
+  - id: redis:protected-configs
+    title: Redis protected configs can be changed at runtime
+    description: enable-protected-configs yes lets clients CONFIG SET dir/dbfilename and similar paths, the standard technique for writing attacker files (SSH keys, cron jobs) through Redis.
+    severity: medium
+    probe: {type: config, format: redis, path: [/etc/redis.conf, /etc/redis/redis.conf, /etc/redis/redis-*.conf, /etc/valkey/valkey.conf], key: enable-protected-configs, default: "no"}
+    expect: ["value in no,local"]
+    remediation: Set enable-protected-configs no.
+    fix: "Set 'enable-protected-configs no' in {file} and restart redis"
+    references: [https://raw.githubusercontent.com/redis/redis/7.2/redis.conf]
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "enable-protected-configs no\n"}}
+      fail: {files: {/etc/redis/redis.conf: "enable-protected-configs yes\n"}}
+
+  - id: redis:config-command
+    title: Redis CONFIG command is not renamed or disabled
+    description: CONFIG SET is how most Redis intrusions turn data access into file writes; renaming it to "" (or restricting it with ACLs) removes that path.
+    severity: low
+    level: strict
+    probe: {type: content, path: [/etc/redis.conf, /etc/redis/redis.conf, /etc/redis/redis-*.conf, /etc/valkey/valkey.conf], regex: "(?i)^\\s*rename-command\\s+config\\s"}
+    expect: [match eq true]
+    evidence: "{path}: no rename-command CONFIG"
+    remediation: Add rename-command CONFIG "" (or use ACLs that deny @dangerous to application users).
+    fix: "echo 'rename-command CONFIG \"\"' >> {path} && systemctl restart redis"
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "rename-command CONFIG \"\"\n"}}
+      fail: {files: {/etc/redis/redis.conf: "port 6379\n"}}
+
+  - id: redis:config-readable-secret
+    title: Redis config with a password is readable by all users
+    description: The config holds requirepass/masterauth in plaintext; world-readable, any local user gets full Redis access.
+    severity: high
+    probe: {type: content, path: [/etc/redis.conf, /etc/redis/*.conf, /etc/valkey/*.conf], regex: "(?i)^\\s*(requirepass|masterauth)\\s+\\S", secret: true}
+    where: [match eq true]
+    expect: [mode bits_none 0004]
+    evidence: "{path} contains requirepass/masterauth and has mode {mode}"
+    remediation: Make the config readable only by root and the redis group.
+    fix: "chown root:redis {path} && chmod 640 {path}"
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "requirepass lync-test-secret\n"}, meta: {/etc/redis/redis.conf: "0640 0 991"}}
+      fail: {files: {/etc/redis/redis.conf: "requirepass lync-test-secret\n"}, meta: {/etc/redis/redis.conf: "0644 0 991"}}
+
+  - id: redis:config-writable
+    title: Redis configuration is writable by other users
+    description: Whoever can edit the config can disable authentication or load a module at the next restart.
+    severity: high
+    probe: {type: file, path: [/etc/redis.conf, /etc/redis/*.conf, /etc/valkey/*.conf]}
+    expect: [mode bits_none 0022]
+    remediation: Make the file writable only by root (Redis needs at most group read).
+    fix: "chmod go-w {path}"
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "\n"}, meta: {/etc/redis/redis.conf: "0640 0 991"}}
+      fail: {files: {/etc/redis/redis.conf: "\n"}, meta: {/etc/redis/redis.conf: "0666 991 991"}}
+
+  - id: redis:process-root
+    title: Redis server runs as root
+    description: Redis as root turns the well-known CONFIG SET dir/dbfilename file-write trick into writing /root/.ssh/authorized_keys or /etc/cron.d entries.
+    severity: high
+    probe: {type: process, process: "^(redis-server|valkey-server)$"}
+    expect: [uid ne 0]
+    remediation: Run Redis as the dedicated redis user (the packaged systemd unit does this).
+    fix: "systemctl cat redis | grep -i '^User='; set User=redis and restart"
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "\n", /proc/7/comm: "redis-server\n", /proc/7/status: "Uid:\t991\t991\t991\t991\n"}}
+      fail: {files: {/etc/redis/redis.conf: "\n", /proc/7/comm: "redis-server\n", /proc/7/status: "Uid:\t0\t0\t0\t0\n"}}
+
+  - id: redis:unixsocket-perm
+    title: Redis Unix socket is world-writable
+    description: unixsocketperm with the other-write bit lets every local user connect to Redis through the socket (connecting requires write permission).
+    severity: medium
+    probe: {type: config, format: redis, path: [/etc/redis.conf, /etc/redis/redis.conf, /etc/redis/redis-*.conf, /etc/valkey/valkey.conf], keys: [unixsocketperm, unixsocket], default: "700"}
+    where: [unixsocket not_empty]
+    expect: [value bits_none 0002]
+    remediation: Use unixsocketperm 770 (or 700) and add trusted application users to the redis group.
+    fix: "Set 'unixsocketperm 770' in {file} and restart redis"
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "unixsocket /run/redis/redis.sock\nunixsocketperm 770\n"}}
+      fail: {files: {/etc/redis/redis.conf: "unixsocket /run/redis/redis.sock\nunixsocketperm 777\n"}}

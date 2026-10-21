@@ -1,0 +1,224 @@
+pack: postgresql
+title: PostgreSQL server
+description: postgresql.conf (per cluster, with include files and postgresql.auto.conf), pg_hba.conf authentication rules, file permissions and version of PostgreSQL servers.
+category: config
+applies_if:
+  file: [/etc/postgresql/*/main/postgresql.conf, /var/lib/pgsql/data/postgresql.conf, /var/lib/pgsql/*/data/postgresql.conf]
+references:
+  - https://www.postgresql.org/docs/current/runtime-config.html
+  - https://www.postgresql.org/docs/current/auth-pg-hba-conf.html
+test_base:
+  files: {/var/lib/pgsql/data/postgresql.conf: "# defaults\n"}
+checks:
+  - id: postgres:listen-all
+    title: PostgreSQL is configured to listen on all interfaces
+    description: listen_addresses '*' (or 0.0.0.0 / ::) accepts connections on every interface; pg_hba.conf is then the only barrier. The default is localhost.
+    severity: medium
+    probe: {type: config, format: postgresql, path: [/etc/postgresql/*/main/postgresql.conf, /var/lib/pgsql/data/postgresql.conf, /var/lib/pgsql/*/data/postgresql.conf], key: listen_addresses, default: localhost}
+    expect: ["value not_regex (^|,)\\s*(\\*|0\\.0\\.0\\.0|::)\\s*(,|$)"]
+    remediation: Listen only on localhost and the specific interfaces clients use, and firewall port 5432.
+    fix: "Set listen_addresses = 'localhost,<private-ip>' in {file} and restart PostgreSQL"
+    references: [https://www.postgresql.org/docs/current/runtime-config-connection.html#GUC-LISTEN-ADDRESSES]
+    tests:
+      pass: [{}, {files: {/var/lib/pgsql/data/postgresql.conf: "listen_addresses = 'localhost,10.0.0.5'\n"}}]
+      fail:
+        - {files: {/var/lib/pgsql/data/postgresql.conf: "listen_addresses = '*'\n"}}
+        - {files: {/var/lib/pgsql/data/postgresql.conf: "listen_addresses = 'localhost'\n", /var/lib/pgsql/data/postgresql.auto.conf: "listen_addresses = '*'\n"}}
+      na: {files: {/var/lib/pgsql/data/postgresql.conf: "!absent", /etc/other.conf: ""}}
+
+  - id: postgres:ssl-off-remote
+    title: PostgreSQL accepts remote connections without TLS
+    description: The server listens beyond loopback but ssl is off, so authentication exchanges and all query data travel in plaintext.
+    severity: medium
+    probe: {type: config, format: postgresql, path: [/etc/postgresql/*/main/postgresql.conf, /var/lib/pgsql/data/postgresql.conf, /var/lib/pgsql/*/data/postgresql.conf], keys: [ssl, listen_addresses], default: "off"}
+    where: ["listen_addresses not_regex ^\\s*(localhost|127\\.0\\.0\\.1|::1)?(\\s*,\\s*(localhost|127\\.0\\.0\\.1|::1))*\\s*$"]
+    expect: ["value in on,true,yes,1"]
+    remediation: Enable TLS (ssl = on with ssl_cert_file/ssl_key_file) and require it in pg_hba.conf with hostssl entries.
+    fix: "Set ssl = on in {file}, install a certificate, change remote 'host' lines to 'hostssl', then reload"
+    references: [https://www.postgresql.org/docs/current/ssl-tcp.html]
+    tests:
+      pass:
+        - {files: {/var/lib/pgsql/data/postgresql.conf: "listen_addresses = '*'\nssl = on\n"}}
+        - {files: {/var/lib/pgsql/data/postgresql.conf: "ssl = off\n"}}
+      fail: {files: {/var/lib/pgsql/data/postgresql.conf: "listen_addresses = '*'\n"}}
+
+  - id: postgres:password-encryption-md5
+    title: New passwords are stored as MD5
+    description: password_encryption = md5 stores passwords with an unsalted-by-design MD5 of password+username that can be replayed against md5 auth; scram-sha-256 has been the default since PostgreSQL 14.
+    severity: medium
+    probe: {type: config, format: postgresql, path: [/etc/postgresql/*/main/postgresql.conf, /var/lib/pgsql/data/postgresql.conf, /var/lib/pgsql/*/data/postgresql.conf], key: password_encryption, default: scram-sha-256}
+    expect: ["value not_in md5,on,true"]
+    remediation: Set password_encryption = scram-sha-256, then re-set each user's password and switch pg_hba.conf methods to scram-sha-256.
+    fix: "Set password_encryption = 'scram-sha-256' in {file}; ALTER ROLE ... PASSWORD '...' for each login role"
+    references: [https://www.postgresql.org/docs/current/runtime-config-connection.html#GUC-PASSWORD-ENCRYPTION]
+    tests:
+      pass: [{}, {files: {/var/lib/pgsql/data/postgresql.conf: "password_encryption = scram-sha-256\n"}}]
+      fail: {files: {/var/lib/pgsql/data/postgresql.conf: "password_encryption = md5\n"}}
+
+  - id: postgres:log-connections
+    title: Connections are not logged
+    description: log_connections records each connection's user, database and source address, which is needed to investigate credential abuse.
+    severity: low
+    level: strict
+    probe: {type: config, format: postgresql, path: [/etc/postgresql/*/main/postgresql.conf, /var/lib/pgsql/data/postgresql.conf, /var/lib/pgsql/*/data/postgresql.conf], key: log_connections, default: "off"}
+    expect: ["value in on,true,yes,1,all,receipt,authentication,authorization"]
+    remediation: Set log_connections = on.
+    fix: "Set log_connections = on in {file} and reload"
+    references: [https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-CONNECTIONS]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/postgresql.conf: "log_connections = on\n"}}
+      fail: {}
+
+  - id: postgres:log-disconnections
+    title: Session ends are not logged
+    description: log_disconnections records session duration, completing the audit trail started by log_connections.
+    severity: low
+    level: strict
+    probe: {type: config, format: postgresql, path: [/etc/postgresql/*/main/postgresql.conf, /var/lib/pgsql/data/postgresql.conf, /var/lib/pgsql/*/data/postgresql.conf], key: log_disconnections, default: "off"}
+    expect: ["value in on,true,yes,1"]
+    remediation: Set log_disconnections = on.
+    fix: "Set log_disconnections = on in {file} and reload"
+    references: [https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-DISCONNECTIONS]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/postgresql.conf: "log_disconnections = on\n"}}
+      fail: {}
+
+  - id: postgres:ssl-min-protocol
+    title: PostgreSQL allows TLS 1.0/1.1
+    description: ssl_min_protocol_version TLSv1 or TLSv1.1 permits deprecated protocols (RFC 8996). The default is TLSv1.2 since PostgreSQL 14.
+    severity: medium
+    probe: {type: config, format: postgresql, path: [/etc/postgresql/*/main/postgresql.conf, /var/lib/pgsql/data/postgresql.conf, /var/lib/pgsql/*/data/postgresql.conf], key: ssl_min_protocol_version, default: TLSv1.2}
+    expect: ["value not_in tlsv1,tlsv1.1"]
+    remediation: Set ssl_min_protocol_version = 'TLSv1.2'.
+    fix: "Set ssl_min_protocol_version = 'TLSv1.2' in {file} and reload"
+    references: [https://www.postgresql.org/docs/current/runtime-config-connection.html#GUC-SSL-MIN-PROTOCOL-VERSION]
+    tests:
+      pass: [{}, {files: {/var/lib/pgsql/data/postgresql.conf: "ssl_min_protocol_version = 'TLSv1.3'\n"}}]
+      fail: {files: {/var/lib/pgsql/data/postgresql.conf: "ssl_min_protocol_version = 'TLSv1'\n"}}
+
+  - id: postgres:hba-trust-remote
+    title: pg_hba.conf trusts network clients without a password
+    description: A host line with method trust from a non-loopback address lets anyone who can reach the port log in as the listed role (often postgres, a superuser) with no credentials.
+    severity: critical
+    level: basic
+    probe: {type: pg_hba, path: [/etc/postgresql/*/main/pg_hba.conf, /var/lib/pgsql/data/pg_hba.conf, /var/lib/pgsql/*/data/pg_hba.conf]}
+    where: [type regex ^host, method eq trust, "address not_regex ^(127\\.|::1(/128)?$|localhost$|samehost$)"]
+    expect_none: true
+    remediation: Replace trust with scram-sha-256 (or cert) for every network line and reload PostgreSQL.
+    fix: "Edit {file}: change 'trust' to 'scram-sha-256', then: systemctl reload postgresql"
+    references: [https://www.postgresql.org/docs/current/auth-trust.html]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/pg_hba.conf: "local all all peer\nhost all all 127.0.0.1/32 trust\nhost all all 10.0.0.0/8 scram-sha-256\n"}}
+      fail: [{files: {/var/lib/pgsql/data/pg_hba.conf: "host all all 0.0.0.0/0 trust\n"}}, {files: {/var/lib/pgsql/data/pg_hba.conf: "hostssl replication repl 10.0.0.0 255.0.0.0 trust\n"}}]
+
+  - id: postgres:hba-trust-local
+    title: pg_hba.conf trusts local connections without a password
+    description: trust on the Unix socket or loopback lets every local user (including a compromised web application) connect as any role, typically the postgres superuser, which can then run commands as the postgres OS user.
+    severity: high
+    probe: {type: pg_hba, path: [/etc/postgresql/*/main/pg_hba.conf, /var/lib/pgsql/data/pg_hba.conf, /var/lib/pgsql/*/data/pg_hba.conf]}
+    where: [method eq trust, "type eq local || address regex ^(127\\.|::1(/128)?$|localhost$|samehost$)"]
+    expect_none: true
+    remediation: Use peer for local socket connections and scram-sha-256 for loopback TCP.
+    fix: "Edit {file}: local lines -> peer, host 127.0.0.1/::1 lines -> scram-sha-256; systemctl reload postgresql"
+    references: [https://www.postgresql.org/docs/current/auth-trust.html]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/pg_hba.conf: "local all postgres peer\nhost all all 127.0.0.1/32 scram-sha-256\n"}}
+      fail: [{files: {/var/lib/pgsql/data/pg_hba.conf: "local all all trust\n"}}, {files: {/var/lib/pgsql/data/pg_hba.conf: "host all all ::1/128 trust\n"}}]
+
+  - id: postgres:hba-password-cleartext
+    title: pg_hba.conf uses cleartext password authentication over TCP
+    description: Method password sends the password in clear text; on a non-TLS host line anyone on the path can capture it.
+    severity: high
+    probe: {type: pg_hba, path: [/etc/postgresql/*/main/pg_hba.conf, /var/lib/pgsql/data/pg_hba.conf, /var/lib/pgsql/*/data/pg_hba.conf]}
+    where: [method eq password, "type in host,hostnossl"]
+    expect_none: true
+    remediation: Use scram-sha-256 (and hostssl) instead of password.
+    fix: "Edit {file}: change 'password' to 'scram-sha-256'; systemctl reload postgresql"
+    references: [https://www.postgresql.org/docs/current/auth-password.html]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/pg_hba.conf: "hostssl all all 10.0.0.0/8 password\nhost all all 10.0.0.0/8 scram-sha-256\n"}}
+      fail: {files: {/var/lib/pgsql/data/pg_hba.conf: "host all all 10.0.0.0/8 password\n"}}
+
+  - id: postgres:hba-open-to-any
+    title: pg_hba.conf allows logins from any address
+    description: A host line for 0.0.0.0/0, ::/0 or all exposes password guessing to the whole network or Internet. Only TLS-only lines with scram-sha-256 or certificate auth are not flagged.
+    severity: medium
+    probe: {type: pg_hba, path: [/etc/postgresql/*/main/pg_hba.conf, /var/lib/pgsql/data/pg_hba.conf, /var/lib/pgsql/*/data/pg_hba.conf]}
+    where: [type regex ^host, "address in 0.0.0.0/0,::/0,all,0.0.0.0/0.0.0.0", "method not_in reject,trust", "type ne hostssl || method not_in scram-sha-256,cert"]
+    expect_none: true
+    remediation: Restrict the address column to the client networks that need access, and use hostssl with scram-sha-256.
+    fix: "Edit {file}: replace 0.0.0.0/0 with the application subnets; systemctl reload postgresql"
+    references: [https://www.postgresql.org/docs/current/auth-pg-hba-conf.html]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/pg_hba.conf: "hostssl all all 0.0.0.0/0 scram-sha-256\nhost all all 10.1.0.0/16 md5\n"}}
+      fail: {files: {/var/lib/pgsql/data/pg_hba.conf: "host all all 0.0.0.0/0 md5\n"}}
+
+  - id: postgres:hba-md5
+    title: pg_hba.conf uses md5 authentication
+    description: md5 auth relies on MD5 password hashes that are replayable if stolen; scram-sha-256 is stronger. (md5 lines still accept SCRAM passwords on PostgreSQL 10+.)
+    severity: low
+    level: strict
+    probe: {type: pg_hba, path: [/etc/postgresql/*/main/pg_hba.conf, /var/lib/pgsql/data/pg_hba.conf, /var/lib/pgsql/*/data/pg_hba.conf]}
+    where: [method eq md5]
+    expect_none: true
+    remediation: Switch to scram-sha-256 after re-setting passwords with password_encryption = scram-sha-256.
+    fix: "Edit {file}: change 'md5' to 'scram-sha-256'; systemctl reload postgresql"
+    references: [https://www.postgresql.org/docs/current/auth-password.html]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/pg_hba.conf: "host all all 10.0.0.0/8 scram-sha-256\n"}}
+      fail: {files: {/var/lib/pgsql/data/pg_hba.conf: "host all all 10.0.0.0/8 md5\n"}}
+
+  - id: postgres:hba-ident-remote
+    title: pg_hba.conf trusts remote ident servers
+    description: TCP ident auth believes whatever user name the client host's ident daemon reports, so any machine in the range can impersonate any role.
+    severity: high
+    probe: {type: pg_hba, path: [/etc/postgresql/*/main/pg_hba.conf, /var/lib/pgsql/data/pg_hba.conf, /var/lib/pgsql/*/data/pg_hba.conf]}
+    where: [type regex ^host, method eq ident, "address not_regex ^(127\\.|::1(/128)?$|localhost$|samehost$)"]
+    expect_none: true
+    remediation: Replace ident with scram-sha-256 or certificate authentication.
+    fix: "Edit {file}: change 'ident' to 'scram-sha-256'; systemctl reload postgresql"
+    references: [https://www.postgresql.org/docs/current/auth-ident.html]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/pg_hba.conf: "host all all 127.0.0.1/32 ident\n"}}
+      fail: {files: {/var/lib/pgsql/data/pg_hba.conf: "host all all 192.168.0.0/16 ident\n"}}
+
+  - id: postgres:config-writable
+    title: PostgreSQL configuration is writable by other users
+    description: Anyone who can edit postgresql.conf or pg_hba.conf can add a trust rule or an archive_command and take over the database and the postgres OS account.
+    severity: high
+    probe: {type: file, path: [/etc/postgresql/*/main/postgresql.conf, /etc/postgresql/*/main/pg_hba.conf, /var/lib/pgsql/data/postgresql.conf, /var/lib/pgsql/data/pg_hba.conf, /var/lib/pgsql/*/data/postgresql.conf, /var/lib/pgsql/*/data/pg_hba.conf]}
+    expect: [mode bits_none 0022]
+    remediation: Make the files writable only by their owner (postgres or root).
+    fix: "chmod go-w {path}"
+    references: [https://www.postgresql.org/docs/current/auth-pg-hba-conf.html]
+    tests:
+      pass: {files: {/var/lib/pgsql/data/pg_hba.conf: "local all all peer\n"}, meta: {/var/lib/pgsql/data/pg_hba.conf: "0600 26 26", /var/lib/pgsql/data/postgresql.conf: "0600 26 26"}}
+      fail: {files: {/var/lib/pgsql/data/pg_hba.conf: "local all all peer\n"}, meta: {/var/lib/pgsql/data/pg_hba.conf: "0666 26 26", /var/lib/pgsql/data/postgresql.conf: "0600 26 26"}}
+
+  - id: postgres:pgpass-perms
+    title: A .pgpass password file is readable by other users
+    description: .pgpass stores database passwords in plaintext. libpq ignores it when it is group/world-accessible, but the passwords are still readable.
+    severity: high
+    probe: {type: file, path: [/root/.pgpass, /home/*/.pgpass, /var/lib/pgsql/.pgpass, /var/lib/postgresql/.pgpass]}
+    where: [type eq file]
+    expect: [mode perm_max 0600]
+    remediation: Restrict the file to its owner.
+    fix: "chmod 600 {path}"
+    references: [https://www.postgresql.org/docs/current/libpq-pgpass.html]
+    tests:
+      pass: {files: {/root/.pgpass: "*:*:*:app:lync-test-secret\n"}, meta: {/root/.pgpass: "0600 0 0"}}
+      fail: {files: {/home/app/.pgpass: "*:*:*:app:lync-test-secret\n"}, meta: {/home/app/.pgpass: "0644 1000 1000"}}
+
+  - id: postgres:eol-pgdg
+    title: PostgreSQL (PGDG build) major version is end-of-life
+    description: PostgreSQL 13 and older no longer receive security fixes from the PostgreSQL project (13 ended November 2025). Applies to PGDG packages (postgresqlNN-server); distribution builds with vendor support are not flagged.
+    severity: high
+    probe: {type: package, name: "postgresql[0-9]*-server"}
+    expect: [upstream version_ge 14]
+    evidence: "{name} {upstream} is past upstream end-of-life"
+    remediation: Upgrade to a supported major version with pg_upgrade or dump/restore.
+    fix: "Install postgresql17-server from PGDG and migrate with pg_upgrade"
+    references: [https://www.postgresql.org/support/versioning/]
+    tests:
+      pass: {packages: {postgresql16-server: 16.4-1PGDG.rhel9}}
+      fail: {packages: {postgresql13-server: 13.16-1PGDG.rhel9, postgresql13: 13.16-1PGDG.rhel9}}

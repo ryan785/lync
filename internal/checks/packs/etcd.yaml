@@ -1,0 +1,62 @@
+pack: etcd
+title: etcd
+description: etcd client/peer transport security from the packaged environment files (/etc/etcd/etcd.conf, /etc/default/etcd) and data directory permissions. etcd often stores Kubernetes Secrets.
+category: config
+applies_if:
+  file: [/etc/etcd/etcd.conf, /etc/default/etcd]
+references:
+  - https://etcd.io/docs/latest/op-guide/security/
+checks:
+  - id: etcd:client-plaintext-remote
+    title: etcd serves clients over plain HTTP on a non-loopback address
+    description: An http:// client URL on an external address exposes the whole key space (including any Kubernetes Secrets) without TLS and without client authentication.
+    severity: high
+    probe: {type: config, format: env, path: [/etc/etcd/etcd.conf, /etc/default/etcd], key: ETCD_LISTEN_CLIENT_URLS, default: "http://localhost:2379"}
+    expect: ["value regex ^\\s*((http://(127\\.0\\.0\\.1|localhost|\\[::1\\])(:[0-9]+)?|https://[^,\\s]+)\\s*,?\\s*)+$"]
+    remediation: Serve clients over https with client-cert-auth, or listen on loopback only.
+    fix: "Set ETCD_LISTEN_CLIENT_URLS=https://<ip>:2379, ETCD_CERT_FILE, ETCD_KEY_FILE, ETCD_CLIENT_CERT_AUTH=true, ETCD_TRUSTED_CA_FILE"
+    references: [https://etcd.io/docs/latest/op-guide/security/]
+    tests:
+      pass: [{files: {/etc/etcd/etcd.conf: "ETCD_NAME=default\n"}}, {files: {/etc/etcd/etcd.conf: "ETCD_LISTEN_CLIENT_URLS=\"https://10.0.0.2:2379,http://127.0.0.1:2379\"\n"}}]
+      fail: {files: {/etc/etcd/etcd.conf: "ETCD_LISTEN_CLIENT_URLS=\"http://0.0.0.0:2379\"\n"}}
+      na: {files: {/etc/other.conf: ""}}
+
+  - id: etcd:client-cert-auth
+    title: etcd accepts remote clients without certificate authentication
+    description: With TLS on a non-loopback client URL but ETCD_CLIENT_CERT_AUTH unset, any client that can connect may read and write all keys (unless etcd RBAC auth is enabled).
+    severity: high
+    probe: {type: config, format: env, path: [/etc/etcd/etcd.conf, /etc/default/etcd], keys: [ETCD_CLIENT_CERT_AUTH, ETCD_LISTEN_CLIENT_URLS], default: "false"}
+    where: ["etcd_listen_client_urls regex https://", "etcd_listen_client_urls not_regex ^\\s*(https?://(127\\.0\\.0\\.1|localhost|\\[::1\\])(:[0-9]+)?\\s*,?\\s*)+$"]
+    expect: [value eq true]
+    remediation: Enable client certificate authentication with a dedicated CA.
+    fix: "Set ETCD_CLIENT_CERT_AUTH=true and ETCD_TRUSTED_CA_FILE=<ca.crt>, restart etcd"
+    references: [https://etcd.io/docs/latest/op-guide/security/#example-2-client-to-server-authentication-with-https-client-certificates]
+    tests:
+      pass: {files: {/etc/etcd/etcd.conf: "ETCD_LISTEN_CLIENT_URLS=\"https://10.0.0.2:2379\"\nETCD_CLIENT_CERT_AUTH=\"true\"\n"}}
+      fail: {files: {/etc/etcd/etcd.conf: "ETCD_LISTEN_CLIENT_URLS=\"https://10.0.0.2:2379\"\n"}}
+
+  - id: etcd:peer-plaintext
+    title: etcd peer traffic uses plain HTTP on a non-loopback address
+    description: Unencrypted peer URLs expose replicated data and let a network attacker join or disrupt the cluster.
+    severity: medium
+    probe: {type: config, format: env, path: [/etc/etcd/etcd.conf, /etc/default/etcd], key: ETCD_LISTEN_PEER_URLS, default: "http://localhost:2380"}
+    expect: ["value regex ^\\s*((http://(127\\.0\\.0\\.1|localhost|\\[::1\\])(:[0-9]+)?|https://[^,\\s]+)\\s*,?\\s*)+$"]
+    remediation: Use https peer URLs with ETCD_PEER_CLIENT_CERT_AUTH=true.
+    fix: "Set ETCD_LISTEN_PEER_URLS=https://<ip>:2380 and the ETCD_PEER_* certificate settings"
+    references: [https://etcd.io/docs/latest/op-guide/security/#example-3-transport-security--client-certificates-in-a-cluster]
+    tests:
+      pass: {files: {/etc/etcd/etcd.conf: "ETCD_LISTEN_PEER_URLS=\"https://10.0.0.2:2380\"\n"}}
+      fail: {files: {/etc/etcd/etcd.conf: "ETCD_LISTEN_PEER_URLS=\"http://10.0.0.2:2380\"\n"}}
+
+  - id: etcd:data-dir-perms
+    title: etcd data directory is accessible to other users
+    description: The data directory holds the full database (and any Kubernetes Secrets in it); it should be 0700 and owned by etcd.
+    severity: medium
+    probe: {type: file, path: /var/lib/etcd}
+    expect: [mode perm_max 0700]
+    remediation: Restrict the directory to the etcd user.
+    fix: "chown etcd:etcd /var/lib/etcd && chmod 700 /var/lib/etcd"
+    references: [https://etcd.io/docs/latest/op-guide/security/]
+    tests:
+      pass: {files: {/etc/etcd/etcd.conf: "\n"}, meta: {/var/lib/etcd: "d0700 990 990"}}
+      fail: {files: {/etc/etcd/etcd.conf: "\n"}, meta: {/var/lib/etcd: "d0755 990 990"}}

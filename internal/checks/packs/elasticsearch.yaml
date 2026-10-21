@@ -1,0 +1,206 @@
+pack: elasticsearch
+title: Elasticsearch / OpenSearch
+description: elasticsearch.yml / opensearch.yml security settings (authentication, TLS, CORS, network binding), keystore and config permissions, and end-of-life versions.
+category: config
+applies_if:
+  file: [/etc/elasticsearch/elasticsearch.yml, /etc/opensearch/opensearch.yml]
+references:
+  - https://www.elastic.co/guide/en/elasticsearch/reference/current/secure-cluster.html
+  - https://opensearch.org/docs/latest/security/configuration/index/
+checks:
+  - id: elasticsearch:security-disabled
+    title: Elasticsearch security (authentication) is disabled
+    description: xpack.security.enabled false turns off authentication, authorization and TLS; anyone who reaches port 9200 can read, delete or ransom every index.
+    severity: high
+    level: basic
+    applies_if: {file: /etc/elasticsearch/elasticsearch.yml}
+    probe: {type: config, format: yaml, path: /etc/elasticsearch/elasticsearch.yml, keys: [xpack.security.enabled, network.host, http.host]}
+    expect: [value ne false]
+    severity_if:
+      - {when: "network.host not_regex ^\\s*(_local_|localhost|127\\.0\\.0\\.1|::1)?\\s*$ || http.host not_regex ^\\s*(_local_|localhost|127\\.0\\.0\\.1|::1)?\\s*$", severity: critical}
+    remediation: Enable security (xpack.security.enabled true), set passwords for built-in users and enable TLS.
+    fix: "Set xpack.security.enabled: true in /etc/elasticsearch/elasticsearch.yml, restart, then run elasticsearch-reset-password -u elastic"
+    references: [https://www.elastic.co/guide/en/elasticsearch/reference/current/security-settings.html]
+    tests:
+      pass:
+        - {files: {/etc/elasticsearch/elasticsearch.yml: "xpack.security.enabled: true\n"}}
+        - {files: {/etc/elasticsearch/elasticsearch.yml: "cluster.name: logs\n"}}
+      fail:
+        - {files: {/etc/elasticsearch/elasticsearch.yml: "xpack.security.enabled: false\n"}}
+        - {name: public, files: {/etc/elasticsearch/elasticsearch.yml: "network.host: 0.0.0.0\nxpack:\n  security:\n    enabled: false\n"}, severity: critical}
+      na: {files: {/etc/opensearch/opensearch.yml: "xpack.security.enabled: false\n"}}
+
+  - id: elasticsearch:network-host-public
+    title: Elasticsearch listens beyond localhost
+    description: network.host other than the default _local_ exposes the REST API (and transport) on external interfaces; authentication and TLS must then be on.
+    severity: medium
+    applies_if: {file: /etc/elasticsearch/elasticsearch.yml}
+    probe: {type: config, format: yaml, path: /etc/elasticsearch/elasticsearch.yml, key: network.host, default: _local_}
+    expect: ["value regex ^\\s*(_local_|localhost|127\\.0\\.0\\.1|::1)\\s*$"]
+    remediation: Bind to localhost or a private interface and restrict ports 9200/9300 with a firewall.
+    fix: "Set network.host to a private address in /etc/elasticsearch/elasticsearch.yml"
+    references: [https://www.elastic.co/guide/en/elasticsearch/reference/current/modules-network.html]
+    tests:
+      pass: {files: {/etc/elasticsearch/elasticsearch.yml: "cluster.name: x\n"}}
+      fail: [{files: {/etc/elasticsearch/elasticsearch.yml: "network.host: 0.0.0.0\n"}}, {files: {/etc/elasticsearch/elasticsearch.yml: "network.host: _site_\n"}}]
+
+  - id: elasticsearch:http-ssl-disabled
+    title: Elasticsearch HTTP TLS is disabled on a non-local listener
+    description: xpack.security.http.ssl.enabled false sends credentials (Basic auth) and data in clear text to every client.
+    severity: medium
+    applies_if: {file: /etc/elasticsearch/elasticsearch.yml}
+    probe: {type: config, format: yaml, path: /etc/elasticsearch/elasticsearch.yml, keys: [xpack.security.http.ssl.enabled, network.host]}
+    where: ["network.host not_regex ^\\s*(_local_|localhost|127\\.0\\.0\\.1|::1)?\\s*$"]
+    expect: [value ne false]
+    remediation: Enable HTTP TLS (xpack.security.http.ssl.enabled true with a keystore/certificate).
+    fix: "Set xpack.security.http.ssl.enabled: true and configure xpack.security.http.ssl.keystore.path"
+    references: [https://www.elastic.co/guide/en/elasticsearch/reference/current/security-basic-setup-https.html]
+    tests:
+      pass: {files: {/etc/elasticsearch/elasticsearch.yml: "network.host: 0.0.0.0\nxpack.security.http.ssl.enabled: true\n"}}
+      fail: {files: {/etc/elasticsearch/elasticsearch.yml: "network.host: 0.0.0.0\nxpack.security.http.ssl.enabled: false\n"}}
+
+  - id: elasticsearch:cors-wildcard
+    title: Elasticsearch allows cross-origin requests from any site
+    description: http.cors.enabled with allow-origin "*" lets any web page a user visits send requests to the cluster from their browser.
+    severity: high
+    applies_if: {file: /etc/elasticsearch/elasticsearch.yml}
+    probe: {type: config, format: yaml, path: /etc/elasticsearch/elasticsearch.yml, keys: [http.cors.enabled, http.cors.allow-origin]}
+    where: [value eq true]
+    expect: ["http.cors.allow-origin not_regex ^\\s*(\\*|/\\.\\*/)\\s*$"]
+    remediation: Disable CORS or restrict http.cors.allow-origin to the exact origins that need it.
+    fix: "Set http.cors.allow-origin to a specific origin (or http.cors.enabled: false)"
+    references: [https://www.elastic.co/guide/en/elasticsearch/reference/current/modules-network.html#http-settings]
+    tests:
+      pass: {files: {/etc/elasticsearch/elasticsearch.yml: "http.cors.enabled: true\nhttp.cors.allow-origin: \"https://kibana.example.org\"\n"}}
+      fail: {files: {/etc/elasticsearch/elasticsearch.yml: "http.cors.enabled: true\nhttp.cors.allow-origin: \"*\"\n"}}
+
+  - id: elasticsearch:keystore-readable
+    title: elasticsearch.keystore is world-readable
+    description: The keystore holds secure settings (bootstrap password, TLS key passwords, cloud credentials) and is only obfuscated unless password-protected.
+    severity: high
+    probe: {type: file, path: [/etc/elasticsearch/elasticsearch.keystore, /etc/opensearch/opensearch.keystore]}
+    expect: [mode bits_none 0004]
+    remediation: Restrict the keystore to root and the service group.
+    fix: "chown root:elasticsearch {path} && chmod 660 {path}"
+    references: [https://www.elastic.co/guide/en/elasticsearch/reference/current/secure-settings.html]
+    tests:
+      pass: {files: {/etc/elasticsearch/elasticsearch.yml: "\n"}, meta: {/etc/elasticsearch/elasticsearch.keystore: "0660 0 994"}}
+      fail: {files: {/etc/elasticsearch/elasticsearch.yml: "\n"}, meta: {/etc/elasticsearch/elasticsearch.keystore: "0644 0 994"}}
+
+  - id: elasticsearch:config-writable
+    title: Elasticsearch/OpenSearch configuration is world-writable
+    description: Whoever can edit the YAML or jvm.options can disable security or inject JVM agents at the next restart. (The packages' 0660 root:elasticsearch mode is expected and not flagged.)
+    severity: high
+    probe: {type: file, path: [/etc/elasticsearch/*.yml, /etc/elasticsearch/jvm.options, /etc/opensearch/*.yml, /etc/opensearch/jvm.options]}
+    expect: [mode bits_none 0002]
+    remediation: Remove write access for other users.
+    fix: "chmod o-w {path}"
+    tests:
+      pass: {files: {/etc/elasticsearch/elasticsearch.yml: "\n"}, meta: {/etc/elasticsearch/elasticsearch.yml: "0660 0 994"}}
+      fail: {files: {/etc/opensearch/opensearch.yml: "\n"}, meta: {/etc/opensearch/opensearch.yml: "0666 0 994"}}
+
+  - id: elasticsearch:eol
+    title: Elasticsearch version is end-of-life
+    description: Elasticsearch 7.x and older no longer receive security fixes from Elastic (7.17 maintenance ended January 2026). 7.x also leaves security off by default.
+    severity: high
+    probe: {type: package, name: elasticsearch}
+    expect: [upstream version_ge 8.0]
+    evidence: "elasticsearch {upstream} is past end-of-life"
+    remediation: Upgrade to a supported 8.x/9.x release (via the 7.17 upgrade assistant).
+    fix: "Follow Elastic's rolling upgrade guide from 7.17 to 8.x"
+    references: [https://www.elastic.co/support/eol]
+    tests:
+      pass: {files: {/etc/elasticsearch/elasticsearch.yml: "\n"}, packages: {elasticsearch: 8.15.2-1}}
+      fail: {files: {/etc/elasticsearch/elasticsearch.yml: "\n"}, packages: {elasticsearch: 7.17.24-1}}
+
+  - id: opensearch:security-disabled
+    title: OpenSearch security plugin is disabled
+    description: plugins.security.disabled true removes authentication, authorization and TLS from the cluster.
+    severity: high
+    level: basic
+    applies_if: {file: /etc/opensearch/opensearch.yml}
+    probe: {type: config, format: yaml, path: /etc/opensearch/opensearch.yml, keys: [plugins.security.disabled, network.host], default: "false"}
+    expect: [value ne true]
+    severity_if:
+      - {when: "network.host not_regex ^\\s*(_local_|localhost|127\\.0\\.0\\.1|::1)?\\s*$", severity: critical}
+    remediation: Re-enable the security plugin and configure users, roles and TLS.
+    fix: "Remove plugins.security.disabled: true from /etc/opensearch/opensearch.yml and run securityadmin.sh"
+    references: [https://opensearch.org/docs/latest/security/configuration/disable-enable-security/]
+    tests:
+      pass: {files: {/etc/opensearch/opensearch.yml: "cluster.name: x\n"}}
+      fail:
+        - {files: {/etc/opensearch/opensearch.yml: "plugins.security.disabled: true\n"}}
+        - {files: {/etc/opensearch/opensearch.yml: "network.host: 0.0.0.0\nplugins.security.disabled: true\n"}, severity: critical}
+      na: {files: {/etc/elasticsearch/elasticsearch.yml: "plugins.security.disabled: true\n"}}
+
+  - id: opensearch:demo-certificates
+    title: OpenSearch uses the public demo certificates
+    description: allow_unsafe_democertificates true means the cluster trusts the demo CA and admin certificate shipped publicly with OpenSearch, so anyone can authenticate as admin.
+    severity: high
+    applies_if: {file: /etc/opensearch/opensearch.yml}
+    probe: {type: config, format: yaml, path: /etc/opensearch/opensearch.yml, key: plugins.security.allow_unsafe_democertificates, default: "false"}
+    expect: [value ne true]
+    remediation: Generate your own CA, node and admin certificates and set allow_unsafe_democertificates false.
+    fix: "Replace the demo certificates (see the OpenSearch TLS guide) and set plugins.security.allow_unsafe_democertificates: false"
+    references: [https://opensearch.org/docs/latest/security/configuration/generate-certificates/]
+    tests:
+      pass: {files: {/etc/opensearch/opensearch.yml: "plugins.security.allow_unsafe_democertificates: false\n"}}
+      fail: {files: {/etc/opensearch/opensearch.yml: "plugins.security.allow_unsafe_democertificates: true\n"}}
+
+  - id: opensearch:http-ssl-disabled
+    title: OpenSearch HTTP TLS is disabled on a non-local listener
+    description: plugins.security.ssl.http.enabled false sends credentials and data to clients in clear text.
+    severity: medium
+    applies_if: {file: /etc/opensearch/opensearch.yml}
+    probe: {type: config, format: yaml, path: /etc/opensearch/opensearch.yml, keys: [plugins.security.ssl.http.enabled, network.host]}
+    where: ["network.host not_regex ^\\s*(_local_|localhost|127\\.0\\.0\\.1|::1)?\\s*$"]
+    expect: [value ne false]
+    remediation: Enable REST-layer TLS with your own certificates.
+    fix: "Set plugins.security.ssl.http.enabled: true with pemcert_filepath/pemkey_filepath"
+    references: [https://opensearch.org/docs/latest/security/configuration/tls/]
+    tests:
+      pass: {files: {/etc/opensearch/opensearch.yml: "network.host: 0.0.0.0\nplugins.security.ssl.http.enabled: true\n"}}
+      fail: {files: {/etc/opensearch/opensearch.yml: "network.host: 0.0.0.0\nplugins.security.ssl.http.enabled: false\n"}}
+
+  - id: opensearch:network-host-public
+    title: OpenSearch listens beyond localhost
+    description: network.host other than the default _local_ exposes the REST API and transport port on external interfaces.
+    severity: medium
+    applies_if: {file: /etc/opensearch/opensearch.yml}
+    probe: {type: config, format: yaml, path: /etc/opensearch/opensearch.yml, key: network.host, default: _local_}
+    expect: ["value regex ^\\s*(_local_|localhost|127\\.0\\.0\\.1|::1)\\s*$"]
+    remediation: Bind to localhost or a private interface and firewall ports 9200/9300.
+    fix: "Set network.host to a private address in /etc/opensearch/opensearch.yml"
+    references: [https://opensearch.org/docs/latest/install-and-configure/configuring-opensearch/network-settings/]
+    tests:
+      pass: {files: {/etc/opensearch/opensearch.yml: "network.host: 127.0.0.1\n"}}
+      fail: {files: {/etc/opensearch/opensearch.yml: "network.host: 0.0.0.0\n"}}
+
+  - id: opensearch:cors-wildcard
+    title: OpenSearch allows cross-origin requests from any site
+    description: http.cors.enabled with allow-origin "*" lets any web page send requests to the cluster from a user's browser.
+    severity: high
+    applies_if: {file: /etc/opensearch/opensearch.yml}
+    probe: {type: config, format: yaml, path: /etc/opensearch/opensearch.yml, keys: [http.cors.enabled, http.cors.allow-origin]}
+    where: [value eq true]
+    expect: ["http.cors.allow-origin not_regex ^\\s*(\\*|/\\.\\*/)\\s*$"]
+    remediation: Disable CORS or list the exact allowed origins.
+    fix: "Set http.cors.allow-origin to a specific origin (or http.cors.enabled: false)"
+    references: [https://opensearch.org/docs/latest/install-and-configure/configuring-opensearch/network-settings/]
+    tests:
+      pass: {files: {/etc/opensearch/opensearch.yml: "http.cors.enabled: false\nhttp.cors.allow-origin: \"*\"\n"}}
+      fail: {files: {/etc/opensearch/opensearch.yml: "http.cors.enabled: true\nhttp.cors.allow-origin: \"*\"\n"}}
+
+  - id: opensearch:eol
+    title: OpenSearch 1.x is end-of-life
+    description: OpenSearch 1.3, the last 1.x line, reached end of maintenance in May 2025 and gets no security fixes.
+    severity: high
+    probe: {type: package, name: opensearch}
+    expect: [upstream version_ge 2.0]
+    evidence: "opensearch {upstream} is past end-of-life"
+    remediation: Upgrade to OpenSearch 2.x or later.
+    fix: "Follow the OpenSearch rolling upgrade guide to 2.x"
+    references: [https://opensearch.org/releases.html]
+    tests:
+      pass: {files: {/etc/opensearch/opensearch.yml: "\n"}, packages: {opensearch: 2.17.1-1}}
+      fail: {files: {/etc/opensearch/opensearch.yml: "\n"}, packages: {opensearch: 1.3.19-1}}
