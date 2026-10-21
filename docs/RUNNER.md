@@ -1,16 +1,32 @@
 # One-shot runner (no install)
 
-Two entry points run a full Lync scan on a host and leave **nothing behind
-except one log file**:
+Two entry points run a full Lync scan on a host without installing
+anything. The product is a **PDF report**; the only other thing left
+behind is a log file:
 
-| | Where you type it | Binary comes from | Report goes to |
-|---|---|---|---|
-| **(a) `lync-run`** | your workstation (Linux, macOS, Git Bash on Windows) | `./dist` (`make release`) or `gh release download`, streamed over SSH | `./lync-results/<UTC>/<host>/` on the workstation |
-| **(b) `run.sh`** | on the host itself | GitHub Release asset (token for a private repo), checksum-verified | stdout (JSON), or `--keep-report DIR` |
+| | Where you type it | Binary comes from | Report goes to | Left on the host |
+|---|---|---|---|---|
+| **(a) `lync-run`** | your workstation (Linux, macOS, Git Bash on Windows) | `./dist` (`make release`) or `gh release download`, streamed over SSH | `./lync-results/<UTC>/<host>/report.pdf` (+ JSON) on the workstation; paths printed at the end, `--open` opens them | the log |
+| **(b) `run.sh`** | on the host itself | GitHub Release asset (token for a private repo), checksum-verified | `./lync-<host>-<UTC>.pdf` in the directory you ran it from (or `--out DIR`), owned by you under sudo; `--json` adds the JSON | the log and the report |
 
-Without an NVD API key the first NVD sync is slow: the 30-day window was
-48k CVEs, about 25 pages at 1-2 min each, so 44 min in the WSL test below.
-Use `--nvd-key-file` (120-day window, faster) and `--cache` for fleets.
+By default CVE data is **looked up**, not downloaded: one OSV.dev batch
+query for the installed packages, details for the advisories that hit,
+Red Hat per CVE on RHEL-family hosts, and NVD by CVE id for severities
+(see [CONFIGURATION.md](CONFIGURATION.md#mode-lookup-default) for what is
+sent where). Measured on a 159-package Debian 12 host (WSL), same box as
+the full-feed run further down:
+
+| | lookup (default) | full feeds (`--full-feeds`) |
+|---|---|---|
+| downloaded | 1.0 MB (343 OSV requests, 10 NVD requests) | 121 MB Debian tracker + OSV export, plus NVD's 30-day window |
+| feed cache on disk | 0.34 MB | 80 MB (305 MB in the temp dir with NVD) |
+| wall time, cold cache | 36 s (31 s of it is NVD's 5-requests-per-30-s limit) | 6 s without NVD; 44 min with NVD and no API key |
+| wall time, warm cache | 1.4 s | - |
+| peak RSS of lyncd | 16-18 MB | 680 MB (without NVD) |
+
+The temp-space preflight is 64 MB in lookup mode and 400 MB with
+`--full-feeds`. `--nvd-key-file` (lookup: 200 NVD lookups per run instead
+of 10; full: a 120-day window) and `--cache` still help fleets.
 
 ## Quick start
 
@@ -42,9 +58,19 @@ no severities. `degraded` in VERDICT means exit 5: a feed failed to sync.)
 Public repo (or after the repo is made public):
 
 ```sh
-curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh
+cd ~ && curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh
+#   ...
+#   ==> Report: /home/you/lync-web1-20261021T080035Z.pdf
+curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh -s -- --json --out /tmp/reports
 curl -fsSL https://github.com/ryan785/lync/releases/latest/download/run.sh | sudo sh -s -- --cve CVE-2026-109618
 ```
+
+The PDF is written to the directory you started in (falling back to
+`$HOME` if that is not writable), named `lync-<host>-<UTC>.pdf`, mode 600
+and owned by `$SUDO_USER` when run through sudo. Its path is the last
+thing printed. `--print-json` also prints the JSON report on stdout (the
+old default) for scripts; `--cve` prints the verdict JSON and writes no
+PDF.
 
 Private repo (fine-grained token with *Contents: read* on ryan785/lync):
 
@@ -74,11 +100,16 @@ mirror directory (`https://...` or `file:///mnt/usb/lync`) holding
    Either way, `sha256(lyncd-linux-<arch>)` must match `SHA256SUMS`
    before it runs. A mismatch exits 3 without executing anything.
 3. **Scan.** `nice -n 19 ionice -c 3 timeout $LYNC_TIMEOUT lyncd -once
-   -config none -sources auto -cache-dir $T/cache -report-dir $T/out
-   -audit-log $LOG [-cve ID] [-enable container:php-upload-progress]`.
+   -config none -feed-mode lookup|full -sources auto -cache-dir $T/cache
+   -report-dir $T/out -audit-log $LOG [-cve ID] [-enable container:php-upload-progress]`.
    - Built-in defaults only. An existing `/etc/lync/lync.yaml` is ignored.
-   - `auto` feeds: the distro's feed (Red Hat, Debian, Ubuntu or Alpine),
-     plus OSV for the host ecosystem, plus NVD.
+   - Lookup mode (default): OSV.dev queries for the installed packages and
+     for application components found by the inventory, Red Hat per CVE
+     on RHEL-family hosts, NVD by CVE id. `--full-feeds`: the distro's bulk
+     feed (Red Hat, Debian, Ubuntu or Alpine) plus the OSV export plus NVD,
+     downloaded into the temp dir.
+   - The package-manager cross-check reads `dnf -C updateinfo` /
+     `apt-get -s dist-upgrade` (cached metadata, nothing installed).
    - The matcher, the applicability judges and all rule checks run, and
      the PDF is rendered.
    - Each external command has a timeout (`audit.Output`, 20 s for rule
@@ -86,10 +117,11 @@ mirror directory (`https://...` or `file:///mnt/usb/lync`) holding
    - Feed downloads retry with backoff. A body cut off mid-transfer is
      retried, the run falls back to HTTP/1.1 after repeated HTTP/2 stream
      errors, and a single hung attempt is cut after 3 min and retried.
-4. **Results.** Mode (a) streams `$T/out` back as tar. Mode (b) prints the
-   JSON report (or `cve-<ID>.json`) to stdout, and with `--keep-report
-   DIR` copies JSON+PDF there (the only case where a report stays on the
-   host, and it is logged as `KEEP`).
+4. **Results.** Mode (a) streams `$T/out` back as tar; nothing but the log
+   stays on the host. Mode (b) copies the PDF (and with `--json` the JSON)
+   to the output directory, logs it as `REPORT+` (and `CHOWN`), and prints
+   the path last; `--cve` prints `cve-<ID>.json` to stdout. `--keep-report
+   DIR` still copies JSON+PDF to DIR as well (`KEEP`).
 5. **Cleanup** is an `EXIT`/`INT`/`TERM`/`HUP` trap. It stops `lyncd` if
    it is still running, lists every remaining file as `FILE-`, runs `rm -rf
    $T`, checks that `$T` is really gone, and logs `CLEANUP ... verified
@@ -106,7 +138,7 @@ only), `wg show`, ...). The one exception, `docker exec <c> php -r` for
 `container:php-upload-progress`, runs only with `--container-exec`. The
 log says this at the top (`POLICY` line).
 
-**The log is the only thing left on the host**:
+**Besides the report in mode (b), the log is the only thing left on the host**:
 `/var/log/lync-run-<UTC>.log` when run as root, otherwise
 `~/lync-run-<UTC>.log`; override it with `--log FILE` (`lync-run
 --remote-log`). The file is mode 600 and contains no secrets: tokens are
@@ -118,6 +150,11 @@ argv.
 
 | run.sh | lync-run | Meaning |
 |---|---|---|
+| `--out DIR` | `--out DIR` | (b) where the PDF goes (default: current directory); (a) local results root |
+| `--json` | | (b) also write the JSON report next to the PDF |
+| `--print-json` | | (b) print the JSON report to stdout too |
+| `--full-feeds` | `--full-feeds` | bulk feed downloads instead of lookups |
+| | `--open` | open each host's PDF locally when done (xdg-open / open / start) |
 | `--cve ID` | `--cve ID` | single-CVE verdict instead of a full scan |
 | `--cache DIR` | `--cache DIR` | (b) seed the feed cache from a copy of DIR; (a) local cache root, pushed to and refreshed from each host per OS (`DIR/<id>-<major>/`), so a fleet run downloads feeds once per OS |
 | env `LYNC_NVD_KEY` | `--nvd-key-file F` | NVD API key (120-day window, faster) |
@@ -125,8 +162,8 @@ argv.
 | `--keep-report DIR` | `--keep-report DIR` | also keep the report on the host |
 | `--sources auto\|none\|LIST` | `--sources ...` | feed selection (`none` = collector + rules only) |
 | `--log FILE` | `--remote-log FILE` | log path on the host |
-| `--min-free-mb N`, `--timeout S` | | preflight space, scan time limit |
-| | `-f FILE`, `--out DIR`, `--bin DIR` | hosts file, results root, binary dir |
+| `--min-free-mb N`, `--timeout S` | | preflight space (64 MB lookup, 400 MB full), scan time limit |
+| | `-f FILE`, `--bin DIR` | hosts file, binary dir |
 
 Environment for run.sh: `LYNC_GH_TOKEN`, `LYNC_REPO` (ryan785/lync),
 `LYNC_VERSION` (latest | vX.Y.Z), `LYNC_BASE_URL`, `LYNC_NVD_KEY`,
@@ -142,7 +179,7 @@ Environment for run.sh: `LYNC_GH_TOKEN`, `LYNC_REPO` (ryan785/lync),
 | 2 | preflight: no usable temp dir, too little space, unsupported arch, no sha256 tool | local preflight: no binary / ssh / tar |
 | 3 | download or checksum failure (binary not executed) | |
 | 4 | lyncd failed or timed out | one or more hosts failed |
-| 5 | report produced, but a feed failed to sync (degraded) | |
+| 5 | report produced, but a feed failed to sync or a lookup failed: the CVE section is incomplete (degraded) | |
 | 10 / 11 / 12 | `--cve`: affected / possibly affected / unknown to feeds | (per host in the table) |
 | 129 / 130 / 143 | stopped by HUP / INT / TERM (cleanup still ran) | |
 
@@ -152,22 +189,59 @@ Environment for run.sh: `LYNC_GH_TOKEN`, `LYNC_REPO` (ryan785/lync),
 
 One line per event, in UTC: `<timestamp> <KIND> <details>`. The kinds are:
 
-- `START`, `POLICY`, `HOST`, `WARN`
+- `START`, `POLICY`, `PRIVACY` (lookup mode: what is sent where), `HOST`, `WARN`
 - `TMP`: temp dir selection, with every skipped candidate and why
 - `FILE+` / `FILE-`: every file created or removed
 - `VERIFY`: checksum
 - `FETCH` / `RETRY` / `HTTP`: URL (redacted), status, bytes, duration,
   attempts, protocol
 - `CMD`: exact command line, exit code, duration, output size
-- `SYNC` / `FEED`: per feed source
+- `SYNC` / `FEED`: per feed source (full mode)
+- `LOOKUP`: per lookup source (ecosystem, packages, advisories, cache
+  hits, requests, bytes, status, duration); `INCOMPLETE` when a source
+  failed
+- `LOCAL`: package-manager cross-check (pending, confirmed, lookup-only,
+  package-manager-only)
+- `INVENTORY`: application components found, warnings, OSV lookup
 - `FACTS`, `MATCH`, `APPLIC`
 - `RULE`: each rule with finding count
 - `CHECK`: all 63 checks with on/off/opt-in and finding count
-- `REPORT`, `SUMMARY`, `KEEP`, `OUTPUT`
+- `REPORT`, `SUMMARY`, `KEEP`, `OUTPUT`, `REPORT+` / `CHOWN` (mode b report)
 - `CLEANUP`, `END`
 - Lyncd's own stderr is appended, indented with `lyncd:`.
 
-Real excerpt (WSL Debian 12 as the "host", mode (a) through the fake ssh, all feeds, no NVD key; 223 lines in full, trimmed to one of each kind). It shows an NVD failure seen in the field (`stream error ... INTERNAL_ERROR`) being retried, the switch to HTTP/1.1, and the sync completing:
+Lookup-mode excerpt (same host, mode (a), default options; 522 lines in
+full, most of them the 342 `FETCH GET https://api.osv.dev/v1/vulns/...`
+lines, trimmed):
+
+```
+2026-10-21T08:00:35Z PRIVACY lookup mode: installed package names+versions (and application components found on disk) go to api.osv.dev, matched CVE ids to NVD (and Red Hat on RHEL-family hosts); use --full-feeds to download feeds instead
+2026-10-21T08:00:35.735Z FEEDS   mode=lookup active sources: osv,nvd (cache /dev/shm/lync-run.XLTjkHKh/cache)
+2026-10-21T08:00:36.835Z FETCH   POST https://api.osv.dev/v1/querybatch status=200 bytes=24.6KB dur=601ms attempts=1 proto=HTTP/2.0
+2026-10-21T08:00:40.152Z LOOKUP  osv ecosystem="Debian:12" packages=159 advisories=342 cache_hits=0 requests=343 bytes=976.2KB status=ok dur=3.919s
+2026-10-21T08:01:11.497Z LOOKUP  nvd candidates=118 unscored=10 found=10 cache_hits=0 requests=10 bytes=52.4KB status=ok dur=31.344s
+2026-10-21T08:01:11.497Z MATCH   vulns=363 candidate_findings=118
+2026-10-21T08:01:11.717Z LOCAL   apt status=ok pending=0 confirmed=0 lookup_only=118 pkgmgr_only=0
+2026-10-21T08:01:11.860Z INVENTORY collected components=0 queryable=0 by_ecosystem=map[] entries=35 files=0 truncated=false warnings=0 dur=13ms
+2026-10-21T08:01:11.871Z SUMMARY findings=139 critical=12 high=62 medium=54 low=8 info=0 unknown=3 suppressed_by_applicability=0
+2026-10-21T08:01:11Z CLEANUP removed /dev/shm/lync-run.XLTjkHKh (8 files, 9012KB); verified absent
+```
+
+Compared with the full-feed run below on the same host: the 118
+Debian-tracker findings are found by lookup with identical fixed
+versions, and lookup mode rates 115 of them (OSV CVSS vectors, NVD for 10
+unscored CVEs) where the tracker left 197 Unknown. The full run's 79 OSV
+findings were false positives from the old bulk converter, which applied
+other ecosystems' fixed versions (Alpine `3.1.7-r0`, Debian 13 `2.37-12`)
+to the Debian 12 host; that converter is fixed for full mode too, after
+which full mode also reports exactly these 118. Its 13 NVD-only findings
+were upstream CPE version-range matches (openssl, vim, glibc) against
+backported Debian builds; lookup mode only asks NVD about CVEs a distro
+source already matched. 214 CVEs affect installed packages with no Debian
+fix yet; they are counted in `data_sources.unfixed_cves` and the PDF, and
+`lync cve` reports them as possibly affected.
+
+Full-feed excerpt (WSL Debian 12 as the "host", mode (a) through the fake ssh, all feeds, no NVD key; 223 lines in full, trimmed to one of each kind). It shows an NVD failure seen in the field (`stream error ... INTERNAL_ERROR`) being retried, the switch to HTTP/1.1, and the sync completing:
 
 ```
 2026-10-21T05:04:47Z START   lync run.sh pid=292 user=root(0) cwd=/root args: cve=none sources=auto keep_report=no cache=none container_exec=0 bundle_stdin=1
@@ -237,12 +311,16 @@ Real excerpt (WSL Debian 12 as the "host", mode (a) through the fake ssh, all fe
 - `shellcheck -s sh run.sh lync-run tests/runner-selftest.sh` must be clean.
 - `make release && sudo sh tests/runner-selftest.sh` on any Linux box (WSL
   works) runs the runner end to end with a fake `ssh` that executes the
-  "remote" command locally, offline (`--sources none`), and asserts:
+  "remote" command locally, offline (`--sources none`: no lookups, no
+  inventory), and asserts:
   - results come back;
   - every log section is present, and the CHECK count equals `lync checks`;
   - the temp dir is removed on success, on SIGTERM mid-scan and on a
     checksum mismatch (where the binary never runs);
-  - mode (b) download from `LYNC_BASE_URL` works;
+  - mode (b) download from `LYNC_BASE_URL` works, the PDF (and with
+    `--json` the JSON) lands in the caller's directory, owned by
+    `SUDO_USER`, its path is printed last, `--out` and `--print-json`
+    work, and mode (a) leaves no report on the host;
   - `--cve` returns exit code 12;
   - no new file named `*lync*` exists outside the test dir.
 - Not yet validated end to end on a real RHEL-family host.

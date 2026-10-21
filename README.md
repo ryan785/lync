@@ -17,9 +17,33 @@ out-of-band changes, and produces a PDF + JSON report.
 
 - **CVE matching** against installed packages on Debian / Ubuntu / Rocky /
   RHEL / AlmaLinux / Fedora / Alpine. RPM-aware version comparison.
-- **Multiple feed sources**: NIST NVD, Red Hat Security Data, Debian
-  Security Tracker, Ubuntu USN, Alpine secdb, OSV.dev (enabled by default;
-  the full-history source for Rocky/Alma).
+- **Lookups, not downloads (default)**: each scan asks OSV.dev about the
+  installed packages (one batch query, then details for the hits only;
+  OSV carries the Debian, Ubuntu, Alpine, Rocky, Alma and RHEL advisory
+  data), Red Hat per CVE on RHEL-family hosts, and NVD by CVE id for
+  severity. A Debian test host needed about 1 MB of downloads, a 0.3 MB
+  cache, 16 MB RSS and 36 s (1.4 s warm) instead of ~120 MB of feeds and
+  ~700 MB RSS. `feed.mode: full` keeps the bulk feeds (NVD, Red Hat, Debian
+  tracker, Ubuntu USN, Alpine secdb, OSV exports). Lookup mode sends
+  package names and versions to api.osv.dev and CVE ids to NVD and Red Hat;
+  see [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md#feed).
+- **Never a silent "0 findings"**: every report lists the sources queried,
+  request counts and whether the CVE section is complete; a failed lookup
+  shows a red banner in the PDF and a degraded exit code.
+- **Package-manager cross-check**: findings are confirmed against `dnf
+  updateinfo` / `apt-get -s` (cached metadata, read-only), and pending
+  security updates no lookup explained are reported too.
+- **Notifications (service mode)**: re-checks every 6 h and after package
+  installs/upgrades, then emails (SMTP, STARTTLS/TLS, optional PDF) or
+  posts webhooks (generic JSON with HMAC signature, Slack, Discord, Teams)
+  about new findings, newly available fixes and resolved findings, each
+  once. `lync notify test` checks the channels.
+- **One-liner = PDF**: `curl ... run.sh | sudo sh` leaves the PDF report in
+  your current directory (owned by you) plus a log; see
+  [`docs/RUNNER.md`](docs/RUNNER.md).
+- **Application inventory**: lockfiles, site-packages, jars, Go/Rust
+  binaries and WordPress outside the package manager, looked up on
+  OSV.dev with the same client ([`docs/INVENTORY.md`](docs/INVENTORY.md)).
 - **RHEL appstream modules**: module-built packages (php, nodejs, ...) are
   compared only against fixes from their own module stream, and NVD CPE
   products match installed subpackages via the source RPM (`php` ->

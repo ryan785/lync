@@ -133,13 +133,50 @@ For non-CVE findings (rules + monitor), the `cve` / `package` /
 `installed` / `fixed_in` / `cvss` fields are empty and `source` is
 either `"lync-rules"` or `"lync-monitor"`.
 
+### `data_sources` (feed.ScanSources)
+
+Where the CVE data came from. Absent in reports from older versions.
+
+```json
+"data_sources": {
+  "mode": "lookup",
+  "checked_at": "2026-10-21T08:00:36Z",
+  "ecosystem": "Debian:12",
+  "packages_checked": 159,
+  "complete": true,
+  "incomplete_reasons": [],
+  "sources": [
+    {"name": "osv", "kind": "lookup", "status": "ok", "requests": 343, "cache_hits": 0, "records": 342, "bytes": 999661},
+    {"name": "nvd", "kind": "lookup", "status": "ok", "requests": 10, "records": 10, "bytes": 53650},
+    {"name": "apt", "kind": "local", "status": "ok", "requests": 1, "detail": "pending=0 confirmed=0 lookup_only=118 pkgmgr_only=0"},
+    {"name": "osv-apps", "kind": "lookup", "status": "skipped", "detail": "no application components to look up"}
+  ],
+  "unfixed_cves": 214
+}
+```
+
+`kind` is `lookup`, `bulk` (full mode) or `local` (package manager).
+`status` is `ok`, `partial`, `failed` or `skipped`. When `complete` is
+false the CVE section is incomplete: the PDF shows a red banner, a zero
+finding count is not a clean bill of health, and `lyncd -once` exits 3.
+`unfixed_cves` counts CVEs that affect an installed package but have no
+fixed version yet (not listed as findings).
+
+### `inventory`
+
+Application components found outside the package manager (full-host
+scans): `total`, `counts` per ecosystem, `queried` (sent to OSV.dev),
+`vulnerable`, `status`, `warnings` with `warning_samples`, walk `stats`,
+and `components[]` (ecosystem, name, version, paths, source, scope). See
+[INVENTORY.md](INVENTORY.md).
+
 ### Categories vs sources
 
 `category` is what kind of issue it is; `source` is who reported it.
 
 | Category | Producers | Source values |
 |---|---|---|
-| `cve` | matcher | `redhat`, `nvd`, `debian`, `ubuntu`, `alpine`, `osv` |
+| `cve` | matcher, package-manager cross-check (`pkgmgr:security-update:<pkg>`), inventory | `redhat`, `nvd`, `debian`, `ubuntu`, `alpine`, `osv`, `apt`, `dnf`, `yum` |
 | `config` | accounts.go, ssh_config.go | `lync-rules` |
 | `eol` | eol.go | `lync-rules` |
 | `hardening` | hardening.go | `lync-rules` |
@@ -157,11 +194,17 @@ The PDF is a faithful visual rendering of the JSON:
 - **Page 1, header**: host + scan timestamp
 - **Page 1, host block**: hostname / OS / kernel / package count / running
   services / scan time
+- **Page 1, data sources**: feed mode, check time, packages checked,
+  ecosystem, one line per source (status, requests, cached, records), the
+  count of CVEs with no fix yet, and a red "CVE SECTION INCOMPLETE" banner
+  with the reasons when a source failed
 - **Page 1, executive summary**: total finding count, highest CVSS callout,
   kernel CVE callout (with specific CVE IDs), active-services-affected
   list
 - **Page 1, severity distribution**: horizontal stacked-bar chart, one row
   per severity, sorted by count
+- **Application inventory**: one paragraph (components per ecosystem, how
+  many OSV.dev flagged, walk stats); the list is in the JSON
 - **Page 2+, findings list**: one card per finding, sorted newest CVE
   first. Each card shows severity-colored left bar, CVE + package on the
   title row, severity label on the right, body fields (Fixed in, CVSS,

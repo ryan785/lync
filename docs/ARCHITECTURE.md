@@ -32,7 +32,8 @@ over a Unix domain socket.
                   +-------------+
 ```
 
-Steps in order:
+Steps in order (in lookup mode, the default, the "feed sources" box is a
+set of API lookups made during the scan: see [Feed modes](#feed-modes)):
 
 1. **Collector** reads the host: OS via `/etc/os-release`, kernel via
    `uname`, packages via `rpm -qa` / `dpkg-query` / `apk info` based on the
@@ -41,7 +42,8 @@ Steps in order:
    `systemctl show -p FragmentPath` + `rpm -qf` (RPM hosts) to map each
    service to the package that owns its unit file. Returns `*collector.Facts`.
 
-2. **Matcher** walks every cached `Vulnerability` from every feed source,
+2. **Matcher** walks every `Vulnerability` (looked up for this scan, or
+   cached by the bulk feeds in full mode),
    filters by distro+version, compares installed NEVR against the
    per-distro fixed version, and emits one `finding.Finding` per
    (CVE, package) pair that fails the comparison. Findings are
@@ -57,10 +59,20 @@ Steps in order:
    CPE matching produces a finding the distro has explicitly evaluated
    and decided doesn't apply.
 
+   After the judges, `matcher.EnrichSeverity` fills severity/CVSS for
+   findings whose winning source had none (OSV CVSS vectors, NVD), and
+   the package-manager cross-check (`feed.local_check`) confirms findings
+   against `dnf updateinfo` / `apt-get -s` and adds pending security
+   updates nothing else explained.
+
 4. **Rules engine** runs the six non-CVE checks (hardening, sshd,
    accounts, filesystem, network, EOL) concurrently and appends their
    findings to the CVE-derived list. Rules run **only on full-host scans**;
    scoped scans (`lync scan -package openssh`) skip them.
+
+   Then the **application inventory** (`internal/inventory`, full-host
+   scans) collects components outside the package manager and looks them
+   up through the same OSV client; hits are CVE findings.
 
 5. **Monitor drain** pulls accumulated file-integrity findings from the
    inotify watcher into the report.
@@ -69,7 +81,14 @@ Steps in order:
    CVE list, active-services-affected, highest CVSS), writes the
    canonical JSON file, then renders the PDF by reading that JSON back.
    PDF is a pure function of JSON — `lync render <json>` produces a
-   byte-identical file.
+   byte-identical file. The JSON carries `data_sources` (mode, sources,
+   request/cache/byte counts, packages checked, timestamp, `complete` and
+   the reasons when it is not) and `inventory`.
+
+7. **Notifications** (`notify.enabled`, daemon only): `internal/notify`
+   diffs the findings at or above `notify.min_severity` against what each
+   channel was last told (state file) and sends new / fix available /
+   resolved / digest messages by SMTP or webhook.
 
 ## Daemon process model
 
@@ -80,7 +99,9 @@ Goroutines spawned during `Run`:
 |---|---|---|
 | `ipc.Serve` | `daemon.Run` | accept CLI connections, dispatch commands |
 | `scheduler.Run` | `daemon.Run` | tick scan/sync timers, dispatch to job functions |
-| `maybeInitialSync` | `daemon.Run` | one-shot startup sync if cache is stale |
+| `maybeInitialSync` | `daemon.Run` | full mode: one-shot startup sync if cache is stale |
+| `maybeInitialScan` | `daemon.Run` | lookup mode: scan soon after start if the newest report is older than `scan.interval` |
+| `watchPackages` | `daemon.Run` | inotify on the rpm/dpkg/apk database; debounced `scan` trigger (`scan.on_package_change`) |
 | `monitor.loop` | `monitor.Start` | drain inotify events, emit runtime findings |
 | `runScan(scope)` | per-scan, ad hoc | full pipeline for one scan |
 | `runSync` | per-sync, ad hoc | feed sync for all enabled sources |
@@ -91,7 +112,39 @@ CLI bypass the scheduler entirely — the IPC handler launches
 `runScan(d.ctx, scope)` directly because the scheduler's trigger channel
 carries no payload.
 
-## Feed sources
+## Feed modes
+
+`feed.mode: lookup` (default) builds an `internal/lookup.Client` instead
+of bulk `feed.Source`s. One scan:
+
+```
+installed packages --(source name, version, ecosystem)--> POST api.osv.dev/v1/querybatch  (1 req / 1000 pkgs, pages)
+advisory ids hit   --(only ids whose "modified" changed)--> GET  api.osv.dev/v1/vulns/{id}  (8 parallel, cached)
+        |
+        v  osvToVulns: one Vulnerability per CVE in id/aliases/upstream, host ecosystem only,
+        |  severity from distro label (Moderate/Important, Ubuntu priority, Debian urgency) and CVSS v3 vector
+matcher.Match (candidates)
+        |--> RHEL family: GET access.redhat.com/.../cve/{CVE}.json per matched CVE  (source "redhat", TTL cache,
+        |    the same records the Red Hat judge reads)
+        |--> NVD: GET ...?cveId=  only for matched CVEs nothing scored (5/30 s, cap, budget, 7-day cache)
+        v
+matcher.Match -> judges -> EnrichSeverity -> local cross-check -> rules -> inventory -> report
+```
+
+Every source returns a `feed.SourceStat`; together they are the report's
+`feed.ScanSources`. A failed querybatch, failed detail fetches, failed
+Red Hat or NVD lookups, or a distro OSV has no ecosystem for set
+`complete: false` with a reason, so a report can never claim "0 findings"
+when the lookups did not happen; `lyncd -once` then exits 3.
+
+The OSV client (`feed.OSVLookup`: `QueryBatchEach`, `QueryBatch`,
+`FetchRecords`, `GetRecordJSON`) is the only querybatch implementation;
+`inventory.QueryOSV` wraps it for application components.
+
+`feed.mode: full` keeps the bulk sources below, synced on
+`feed.sync_interval` into `feed.cache_dir`.
+
+## Feed sources (full mode)
 
 | Source | Bulk URL pattern | Scope |
 |---|---|---|
@@ -116,6 +169,20 @@ type Source interface {
 writes `<source>/vulns.json` and `<source>/manifest.json`. Per-CVE detail
 data (RedHat, Ubuntu judges) lives under `<source>/details/<CVE>.json`.
 
+## Notifications
+
+`internal/notify` (daemon, after each full scan; `lync notify test` from
+the CLI). Channels implement `Channel{Name, Send}`: SMTP (`net/smtp`,
+STARTTLS or implicit TLS, PLAIN auth, multipart text+HTML, optional PDF)
+and webhooks (generic JSON `lync.notification/v1` with optional
+HMAC-SHA256 `X-Lync-Signature-256`, Slack blocks, Discord embed, Teams
+Adaptive Card). Webhooks use their own HTTP transport so tokenised URLs
+never reach the audit log; errors carry only the host. The state file keeps
+one snapshot per channel (finding id -> severity, fixed version), so each
+channel is told once, catches up after an outage, and new channels start
+with a baseline. Missing CVE findings are not "resolved" when the scan's
+CVE data was incomplete.
+
 ## Applicability judges
 
 Each judge implements `applicability.Judge`:
@@ -130,7 +197,7 @@ type Judge interface {
 
 | Judge | Source of truth | Lookup |
 |---|---|---|
-| Red Hat | `cve/<id>.json` detail | `package_state[]` for host RHEL major + `affected_release[]` with shipped-NEVRA comparison |
+| Red Hat | `cve/<id>.json` detail (`feed.RedHatDetails`, TTL cache shared with lookups) | `package_state[]` for host RHEL major + `affected_release[]` with shipped-NEVRA comparison |
 | Debian | Cached `feed/debian/vulns.json` | In-memory `(CVE, distro, pkg) -> status` index |
 | Ubuntu | `cves/<id>.json` detail | `packages[].statuses[release_codename]` |
 | SUSE | Stub | Returns Unknown — Phase 2+ |
@@ -244,7 +311,12 @@ cmd/
 
 internal/
   collector/             host fact gathering (rpm.go, dpkg.go, apk.go, services.go, ...)
-  feed/                  vuln data sources (one .go per provider)
+  feed/                  vuln data sources (one .go per provider), lookup clients
+                         (osv_lookup, nvd_lookup, redhat_lookup), CVSS v3 scoring,
+                         host ecosystem mapping, ScanSources
+  lookup/                lookup-mode orchestration + package-manager cross-check
+  notify/                email / webhook notifications and their state
+  inventory/             application components outside the package manager
   matcher/               CVE matching + RPM-aware version comparison
   applicability/         per-distro judges that drop or downgrade findings
   rules/                 non-CVE rules engine (hardening.go, ssh_config.go, ...)

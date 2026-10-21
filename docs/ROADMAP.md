@@ -27,6 +27,52 @@ Things to know when checking a just-published CVE:
    as "no fix found for the installed module stream ... switch module
    stream" once another stream has a fix.
 
+## Done: lookup mode, notifications, PDF one-liner (2026-10)
+
+- **Lookup mode is the default** (`feed.mode: lookup`, `lyncd -feed-mode`,
+  `run.sh --full-feeds` for the old behaviour). OSV.dev querybatch +
+  per-advisory details for installed packages, Red Hat per CVE on
+  RHEL-family hosts, NVD by CVE id for unscored CVEs only. Caches under
+  0.5 MB on a Debian host; 1 MB downloaded instead of ~300 MB; peak RSS
+  16-18 MB instead of ~700 MB (the OSV-zip RSS spike only exists in full
+  mode now). Reports carry `data_sources` and say when the CVE section is
+  incomplete.
+- **Bulk OSV converter fixed** (full mode too): it applied every
+  ecosystem's fixed versions to the host (79 false positives on the Debian
+  test host: Alpine and Debian 13 versions), ignored `upstream` CVE ids
+  (DEBIAN-CVE-*, current RLSA/RHSA records) and dropped severity.
+- **Severity enrichment**: OSV CVSS v3 vectors are scored and missing
+  severities are filled from other sources, so Debian findings are no
+  longer Unknown in lookup mode (197 -> 3 on the test host). In full mode
+  the Debian tracker findings stay Unknown unless NVD has the CVE.
+- **Package-manager cross-check** (`feed.local_check`): dnf/yum
+  updateinfo or apt-get -s, read-only.
+- **Service mode**: scan every 6 h and after rpm/dpkg/apk database
+  changes; email (SMTP) and webhook (generic+HMAC, Slack, Discord, Teams)
+  notifications on new / fix available / resolved, with per-channel state;
+  `lync notify test`. This also covers "rescan when new CVEs appear": every
+  scan asks the sources, so no separate sync-triggered rescan is needed in
+  lookup mode.
+- **One-liner gives the PDF**: run.sh writes `lync-<host>-<UTC>.pdf` to the
+  caller's directory (owned by the sudo user); lync-run prints the local
+  PDF paths and has `--open`.
+- **Application inventory** wired into full-host scans through the same
+  OSV client.
+
+Privacy note: lookup mode sends installed package names and versions,
+and application component names and versions, to `api.osv.dev`, and CVE
+ids to NVD and Red Hat. `feed.mode: full` sends nothing host-specific.
+
+Open follow-ups:
+
+| Item | Why | Effort |
+|---|---|---|
+| Real-host validation of lookup mode on Rocky/Alma/RHEL, Ubuntu and Alpine | Only Debian 12 ran for real; the RPM/Ubuntu/Alpine query names, epochs and the Red Hat per-CVE path are covered by fakes built from real API responses | 0.5 d with hosts |
+| Report unfixed CVEs | Lookup mode counts them (`unfixed_cves`, 214 on the test host) but does not list them | 1 d |
+| Embedded CA roots | Lookups fail on hosts without a CA bundle (the report then says "incomplete") | 1 h |
+| NVD API key in the packaged config | Without a key NVD enrichment is 10 CVEs per scan (cached for 7 days) | docs |
+| Notification channels: ntfy / PagerDuty / generic SMTP relay templates | Only the four webhook formats and SMTP exist | 0.5 d each |
+
 ## 0. Next: false positives from the first field run (2026-10)
 
 Listed in the order they inflate the report.
@@ -46,8 +92,8 @@ Also from the runner work:
   Debian). Consider embedding fallback roots
   (`golang.org/x/crypto/x509roots/fallback`) so the static binary works
   anywhere. Effort: 1 h, plus one dependency.
-- The Debian feed has no severities, so Debian CVE findings show as
-  Unknown. Enrich from NVD/OSV CVSS when present. Effort: 0.5 d.
+- ~~The Debian feed has no severities~~: done in lookup mode (OSV CVSS
+  vectors + NVD enrichment, see above).
 - `lync-run` cache reuse: OSV is per ecosystem, so the cache is keyed by
   `<os-id>-<major>`. A shared NVD/OSV cache across distros would save more.
   Effort: 0.5 d.
@@ -138,9 +184,9 @@ They already cover OS packages plus language dependencies.
 |---|---|---|
 | Red Hat CSAF/VEX feed in place of the Hydra summary API | No 365-day window; explicit module-stream product IDs; VEX "known_affected / under_investigation" before a fix ships. Red Hat is moving consumers to CSAF/VEX (check the Hydra API's deprecation status). | 2-3 d |
 | Report unfixed CVEs as findings | OSV entries without a `fixed` event and Red Hat `package_state: Affected` with no erratum are silently dropped. Emit them as `fix_available=false` findings (severity kept, flagged). | 1 d |
-| Rescan when a sync brings new CVEs | The "new CVE -> immediate exposure check" idea from the design isn't wired up: a sync doesn't trigger a scan. Diff CVE IDs per source and trigger a scan when new ones match installed names. | 0.5 d |
+| Rescan when a sync brings new CVEs | Full mode only: a sync doesn't trigger a scan. In lookup mode every scan (6 h, and after package changes) queries the sources directly. | 0.5 d |
 | NVD incremental merge | Each sync replaces the cache with the last 30/120 days, so older NVD-only CVEs vanish. Merge by `lastModified` instead. Get an NVD API key in the meantime. | 1 d |
-| OSV zip streamed to disk | `fetchEcosystem` reads the whole all.zip into memory, a large RSS spike against the 30 MB target. | 0.5 d |
+| OSV zip streamed to disk | Full mode only: `fetchEcosystem` reads the whole all.zip into memory (680 MB peak RSS on the Debian test host). Lookup mode, the default, peaks at 16-18 MB. | 0.5 d |
 | dpkg version comparison | dpkg versions are compared with the RPM algorithm; ordering differs for `~`/`+`/letters in edge cases. Add a real dpkg vercmp for `Manager == "dpkg"`. | 0.5 d |
 
 ## 4. Daemon and packaging (P2/P3)

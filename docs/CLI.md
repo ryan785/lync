@@ -72,9 +72,11 @@ Use `lync status` to watch progress.
 
 ### `lync sync`
 
-Force an immediate feed refresh. Useful when you've just landed a new
-NVD API key or want to pull the latest data without waiting for the
-scheduled tick.
+Full feed mode only (`feed.mode: full`): force an immediate feed refresh.
+Useful when you've just landed a new NVD API key or want to pull the
+latest data without waiting for the scheduled tick. In lookup mode (the
+default) there is nothing to sync, because every scan queries the sources;
+the command says so and exits 0. Run `lync scan` instead.
 
 ```sh
 lync sync
@@ -111,24 +113,39 @@ The JSON is the canonical artifact — modifying it (e.g. piping through
 
 ### `lync cve <CVE-ID>`
 
-"Am I affected by CVE-X?" Collects fresh facts, looks the CVE up in every
-cached feed, runs the matcher and applicability judges on just that CVE,
-and prints a verdict:
+"Am I affected by CVE-X?" Collects fresh facts, gets the CVE's data, runs
+the matcher and applicability judges on just that CVE, and prints a
+verdict. In lookup mode (default) the data is fetched now: OSV.dev's CVE
+record, the distro's per-CVE record (`DEBIAN-CVE-…`, `UBUNTU-CVE-…`,
+`ALPINE-CVE-…`), related distro advisories (`RLSA-`, `ALSA-`, `RHSA-`,
+`DSA-`, `USN-`), advisories cached by earlier scans, Red Hat's per-CVE
+record on RHEL-family hosts, and NVD by id. In full mode it reads the
+cached feeds. `-json` includes `sources` (what was queried and whether it
+answered).
 
 | Verdict | Exit | Meaning |
 |---|---|---|
 | `not_affected` | 0 | Feeds know the CVE; installed builds are at/above the fix, or the named packages aren't installed |
 | `affected` | 10 | A fixed version / range says the installed build is vulnerable (findings include remediation) |
 | `possibly_affected` | 11 | An installed package is named for this CVE but no fixed version has been published yet |
-| `unknown` | 12 | No cached feed has this CVE. **Not** a clean bill of health: run `lync sync` and retry |
+| `unknown` | 12 | No source has data for this CVE yet (or the lookups failed: the reason says which). **Not** a clean bill of health |
 
-It does not sync feeds itself. `-json` prints the full result (known_by,
-installed candidates with fixed versions, findings).
+`-json` prints the full result (known_by, installed candidates with fixed
+versions, findings, sources). In full mode it does not sync feeds itself:
+run `lync sync` first for a CVE published after the last sync.
 
 ```
-$ lync sync          # wait for it to finish (lync status)
 $ lync cve CVE-2026-109618
 ```
+
+### `lync notify test [-config FILE]`
+
+Sends a test message to every channel configured under `notify:` (email,
+webhooks) and prints `sent` or the error per channel; exit 1 if any
+failed. Reads the config directly (default `/etc/lync/lync.yaml`), needs
+no daemon, and works even while `notify.enabled` is false so channels can
+be checked before switching them on. See
+[CONFIGURATION.md](CONFIGURATION.md#notify).
 
 ### `lync checks [-config FILE]`
 

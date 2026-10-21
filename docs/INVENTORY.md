@@ -88,7 +88,8 @@ opened as binaries, and only their headers/sections are read.
 
 ## OSV.dev lookup
 
-`QueryOSV` posts `{"queries":[{"package":{"name","ecosystem"},"version"}]}`
+`QueryOSV` is a thin wrapper over `feed.OSVLookup` (`QueryBatchEach`,
+`FetchRecords`), the one OSV client shared with the OS package lookups. It posts `{"queries":[{"package":{"name","ecosystem"},"version"}]}`
 to `https://api.osv.dev/v1/querybatch` in chunks of `BatchSize` (max 1000,
 the API limit), re-queries only the entries that returned a
 `next_page_token` (up to `MaxPages` rounds), and then fetches
@@ -116,26 +117,16 @@ images, Maven jars without a known group) are not sent.
 
 ## Wiring into a scan
 
-The package is self-contained; the daemon does not call it yet. A full
-scan needs three steps after the rules engine in `runScan` (full-host
-scans only):
-
-```go
-if scope.IsAll() && d.cfg.Inventory.Enabled {
-    comps, warns := inventory.Collect(ctx, rules.RealHost(), inventory.Options{
-        Containers: d.cfg.Inventory.Containers,        // plus Roots/SkipPaths from config
-    })
-    hits, err := inventory.QueryOSV(ctx, nil, comps)   // http.DefaultTransport is already the audit transport
-    if err != nil { d.log.Warn("osv app lookup", "err", err) } else {
-        findings = append(findings, inventory.Findings(hits, time.Now())...)
-    }
-    // log warns as INVENTORY audit lines; optionally write comps into the JSON report
-}
-```
-
-and an `inventory:` config block (`enabled`, `containers`, `roots`,
-`skip_paths`, `time_budget`). Use `rules.Host{Root: cfg.Rules.Root}` to scan
-a mounted image or chroot.
+Full-host scans (daemon and `lyncd -once`) run the inventory after the
+rules engine (`internal/daemon/inventory.go`): `CollectResult` with the
+`inventory:` config block (`enabled` default true, `containers` default
+false, `roots`, `skip_paths`, `time_budget` default 2m; `rules.root` is
+honoured), warnings as `INVENTORY` audit lines (first 100), `QueryOSV`,
+then `Findings`. A failed lookup marks the report's CVE data incomplete
+(source `osv-apps`). The JSON report gets an `inventory` section
+(component list, counts per ecosystem, vulnerable count, walk stats,
+warning samples) and the PDF a short summary. `lyncd -sources none` turns
+the inventory off.
 
 ## Not covered
 
