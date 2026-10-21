@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ryan785/lync/internal/collector"
 )
 
 // AlpineSource pulls the Alpine secdb feed for the host's running Alpine
@@ -45,7 +47,8 @@ type alpinePkg struct {
 }
 
 func (s *AlpineSource) Sync(ctx context.Context, store *Store, log *slog.Logger) error {
-	id, versionID, _ := readOSReleaseFields(s.osIDFile)
+	osi := collector.ReadOSReleaseFile(s.osIDFile)
+	id, versionID := osi.ID, osi.VersionID
 	if id != "alpine" {
 		log.Info("alpine sync skipped (not running on alpine)")
 		return store.PutVulns(s.Name(), nil)

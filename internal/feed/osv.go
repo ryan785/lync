@@ -10,9 +10,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/ryan785/lync/internal/collector"
 )
 
 // OSVSource pulls one bulk all.zip per ecosystem from OSV.dev. The ecosystem
@@ -36,6 +37,8 @@ func (s *OSVSource) Name() string { return "osv" }
 type osvRecord struct {
 	ID         string         `json:"id"`
 	Aliases    []string       `json:"aliases"`
+	Upstream   []string       `json:"upstream"`
+	Related    []string       `json:"related"`
 	Summary    string         `json:"summary"`
 	Details    string         `json:"details"`
 	Affected   []osvAffected  `json:"affected"`
@@ -46,8 +49,9 @@ type osvRecord struct {
 }
 
 type osvAffected struct {
-	Package osvPackage `json:"package"`
-	Ranges  []osvRange `json:"ranges"`
+	Package           osvPackage      `json:"package"`
+	Ranges            []osvRange      `json:"ranges"`
+	EcosystemSpecific json.RawMessage `json:"ecosystem_specific,omitempty"`
 }
 
 type osvPackage struct {
@@ -76,17 +80,18 @@ type osvReference struct {
 }
 
 func (s *OSVSource) Sync(ctx context.Context, store *Store, log *slog.Logger) error {
-	ecosystems := osvEcosystemsForHost(s.osIDFile)
-	if len(ecosystems) == 0 {
+	host, ok := EcosystemForOS(collector.ReadOSReleaseFile(s.osIDFile))
+	if !ok {
 		log.Info("osv sync skipped (no matching ecosystem for host)")
 		return store.PutVulns(s.Name(), nil)
 	}
+	ecosystems := []string{host.Bulk}
 	log.Info("osv sync starting", "ecosystems", ecosystems)
 
 	var all []Vulnerability
 	var firstErr error
 	for _, eco := range ecosystems {
-		v, err := s.fetchEcosystem(ctx, eco, log)
+		v, err := s.fetchEcosystem(ctx, eco, host, log)
 		if err != nil {
 			log.Error("osv ecosystem fetch failed", "ecosystem", eco, "err", err)
 			if firstErr == nil {
@@ -109,7 +114,7 @@ func (s *OSVSource) Vulnerabilities(store *Store) ([]Vulnerability, error) {
 	return store.GetVulns(s.Name())
 }
 
-func (s *OSVSource) fetchEcosystem(ctx context.Context, ecosystem string, log *slog.Logger) ([]Vulnerability, error) {
+func (s *OSVSource) fetchEcosystem(ctx context.Context, ecosystem string, host HostEcosystem, log *slog.Logger) ([]Vulnerability, error) {
 	u := "https://osv-vulnerabilities.storage.googleapis.com/" + url.PathEscape(ecosystem) + "/all.zip"
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -152,60 +157,22 @@ func (s *OSVSource) fetchEcosystem(ctx context.Context, ecosystem string, log *s
 		if err != nil {
 			continue
 		}
-		if v, ok := convertOSV(&rec, ecosystem); ok {
-			vulns = append(vulns, v)
+		for _, v := range osvToVulns(&rec, host.Accept, host.Distro, false) {
+			vulns = append(vulns, trimVuln(v))
 		}
 	}
 	return vulns, nil
 }
 
+// convertOSV converts a record from one ecosystem's bulk export and
+// returns the first CVE it covers (kept for tests; Sync uses osvToVulns,
+// which emits one Vulnerability per CVE).
 func convertOSV(r *osvRecord, ecosystem string) (Vulnerability, bool) {
-	// Pick the canonical CVE id if available — many OSV records use distro
-	// advisory ids as primary (RHSA, USN, DSA) and CVE as alias.
-	id := r.ID
-	for _, a := range r.Aliases {
-		if strings.HasPrefix(a, "CVE-") {
-			id = a
-			break
-		}
-	}
-	if !strings.HasPrefix(id, "CVE-") && !strings.HasPrefix(r.ID, "CVE-") {
-		// No CVE link — skip; our matcher dedupes on CVE id.
+	vs := osvToVulns(r, nil, osvEcosystemToDistroFilter(ecosystem), false)
+	if len(vs) == 0 {
 		return Vulnerability{}, false
 	}
-	desc := r.Details
-	if desc == "" {
-		desc = r.Summary
-	}
-	v := Vulnerability{
-		ID:          id,
-		Source:      "osv",
-		Description: desc,
-	}
-	for _, s := range r.Severity {
-		if strings.HasPrefix(s.Type, "CVSS_V3") {
-			v.Severity = "" // not directly mappable; let matcher fallback to CVSS
-		}
-	}
-	for _, ref := range r.References {
-		v.References = append(v.References, ref.URL)
-	}
-	distroFilter := osvEcosystemToDistroFilter(ecosystem)
-	for _, aff := range r.Affected {
-		fixed := lastFixedInRanges(aff.Ranges)
-		if fixed == "" {
-			continue
-		}
-		v.Affects = append(v.Affects, AffectedPackage{
-			Distro:       distroFilter,
-			Name:         aff.Package.Name,
-			FixedVersion: fixed,
-		})
-	}
-	if len(v.Affects) == 0 {
-		return Vulnerability{}, false
-	}
-	return v, true
+	return vs[0], true
 }
 
 func lastFixedInRanges(ranges []osvRange) string {
@@ -222,7 +189,7 @@ func lastFixedInRanges(ranges []osvRange) string {
 // osvEcosystemToDistroFilter maps OSV ecosystem strings ("Rocky Linux:9",
 // "Debian:12") to our matcher's distro filter format ("rhel:9", "debian:12").
 func osvEcosystemToDistroFilter(ecosystem string) string {
-	parts := strings.SplitN(ecosystem, ":", 2)
+	parts := strings.SplitN(strings.TrimSuffix(ecosystem, ":LTS"), ":", 2)
 	name := parts[0]
 	ver := ""
 	if len(parts) > 1 {
@@ -250,62 +217,12 @@ func osvEcosystemToDistroFilter(ecosystem string) string {
 	return family + ":" + ver
 }
 
-// osvEcosystemsForHost reads /etc/os-release and returns the OSV ecosystem
-// strings that apply. Supports Rocky/RHEL/Alma, Debian, Ubuntu, Alpine, SUSE.
+// osvEcosystemsForHost reads an os-release file and returns the OSV bulk
+// export names that apply (one per host).
 func osvEcosystemsForHost(osReleasePath string) []string {
-	id, versionID, _ := readOSReleaseFields(osReleasePath)
-	if id == "" {
+	eco, ok := EcosystemForOS(collector.ReadOSReleaseFile(osReleasePath))
+	if !ok {
 		return nil
 	}
-	major := versionID
-	if i := strings.Index(versionID, "."); i > 0 {
-		major = versionID[:i]
-	}
-	switch id {
-	case "rocky":
-		return []string{"Rocky Linux:" + major}
-	case "almalinux":
-		return []string{"AlmaLinux:" + major}
-	case "rhel":
-		return []string{"Red Hat:" + major}
-	case "debian":
-		return []string{"Debian:" + major}
-	case "ubuntu":
-		return []string{"Ubuntu:" + versionID}
-	case "alpine":
-		// Alpine uses "v3.18", "v3.19", etc.
-		if !strings.HasPrefix(versionID, "v") {
-			versionID = "v" + versionID
-		}
-		return []string{"Alpine:" + versionID}
-	case "opensuse-leap", "sles":
-		return []string{"SUSE:" + versionID}
-	}
-	return nil
-}
-
-// readOSReleaseFields is a minimal /etc/os-release parser limited to the
-// keys osv needs. Avoids depending on collector.readOSRelease to keep this
-// package free of cross-internal imports.
-func readOSReleaseFields(path string) (id, versionID, prettyName string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok {
-			continue
-		}
-		v = strings.Trim(v, `"`)
-		switch k {
-		case "ID":
-			id = v
-		case "VERSION_ID":
-			versionID = v
-		case "PRETTY_NAME":
-			prettyName = v
-		}
-	}
-	return
+	return []string{eco.Bulk}
 }

@@ -2,42 +2,30 @@ package applicability
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/ryan785/lync/internal/audit"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/ryan785/lync/internal/collector"
+	"github.com/ryan785/lync/internal/feed"
 	"github.com/ryan785/lync/internal/matcher"
 )
-
-const redhatDetailURL = "https://access.redhat.com/hydra/rest/securitydata/cve/%s.json"
 
 // RedHatJudge looks up Red Hat's per-CVE detail (which the summary feed
 // doesn't expose) and inspects package_state[] for an entry matching the
 // host's RHEL major version + the package in the candidate finding.
+// Fetching and the on-disk cache live in feed.RedHatDetails, shared with
+// the lookup path so a CVE is fetched once per TTL.
 type RedHatJudge struct {
-	cacheDir string
-	client   *http.Client
-
-	mu       sync.Mutex
-	inflight map[string]*sync.WaitGroup
-	negCache map[string]time.Time // recent fetch failures, don't immediately retry
+	details *feed.RedHatDetails
 }
 
 func NewRedHatJudge(cacheDir string) *RedHatJudge {
-	return &RedHatJudge{
-		cacheDir: cacheDir,
-		client:   &http.Client{Timeout: 30 * time.Second},
-		inflight: map[string]*sync.WaitGroup{},
-		negCache: map[string]time.Time{},
-	}
+	return &RedHatJudge{details: feed.NewRedHatDetails(cacheDir)}
+}
+
+// NewRedHatJudgeWith uses an existing detail client (shared cache/TTL).
+func NewRedHatJudgeWith(d *feed.RedHatDetails) *RedHatJudge {
+	return &RedHatJudge{details: d}
 }
 
 func (j *RedHatJudge) Name() string { return "redhat" }
@@ -56,33 +44,11 @@ func (j *RedHatJudge) AppliesTo(os collector.OSInfo) bool {
 	return false
 }
 
-type redHatDetail struct {
-	Name            string                  `json:"name"`
-	ThreatSeverity  string                  `json:"threat_severity"`
-	Statement       string                  `json:"statement"`
-	PackageState    []redHatPackageState    `json:"package_state"`
-	AffectedRelease []redHatAffectedRelease `json:"affected_release"`
-}
-
-type redHatPackageState struct {
-	ProductName string `json:"product_name"`
-	PackageName string `json:"package_name"`
-	FixState    string `json:"fix_state"`
-	CPE         string `json:"cpe"`
-}
-
-type redHatAffectedRelease struct {
-	ProductName string `json:"product_name"`
-	Package     string `json:"package"`
-	Advisory    string `json:"advisory"`
-	CPE         string `json:"cpe"`
-}
-
 func (j *RedHatJudge) Evaluate(ctx context.Context, cveID, pkgName string, facts *collector.Facts) (Verdict, error) {
 	if cveID == "" || pkgName == "" {
 		return Verdict{Status: StatusUnknown, Judge: j.Name()}, nil
 	}
-	d, err := j.detail(ctx, cveID)
+	d, _, err := j.details.Get(ctx, cveID)
 	if err != nil {
 		return Verdict{Status: StatusUnknown, Judge: j.Name()}, err
 	}
@@ -253,95 +219,6 @@ func parseFixNEVRA(s string) (name, nevr string, ok bool) {
 		return s[:last], s[last+1:], true
 	}
 	return s[:second], s[second+1:], true
-}
-
-// detail fetches Red Hat's per-CVE JSON, caching on disk. Concurrent calls
-// for the same CVE wait on a shared sync.WaitGroup so we don't refetch.
-func (j *RedHatJudge) detail(ctx context.Context, cveID string) (*redHatDetail, error) {
-	path := filepath.Join(j.cacheDir, cveID+".json")
-	if data, err := os.ReadFile(path); err == nil {
-		var d redHatDetail
-		if err := json.Unmarshal(data, &d); err == nil {
-			return &d, nil
-		}
-	}
-
-	j.mu.Lock()
-	if t, ok := j.negCache[cveID]; ok && time.Since(t) < 10*time.Minute {
-		j.mu.Unlock()
-		return nil, nil
-	}
-	if wg, ok := j.inflight[cveID]; ok {
-		j.mu.Unlock()
-		wg.Wait()
-		// Try cache again — peer may have populated it.
-		if data, err := os.ReadFile(path); err == nil {
-			var d redHatDetail
-			if err := json.Unmarshal(data, &d); err == nil {
-				return &d, nil
-			}
-		}
-		return nil, nil
-	}
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
-	j.inflight[cveID] = wg
-	j.mu.Unlock()
-
-	defer func() {
-		j.mu.Lock()
-		delete(j.inflight, cveID)
-		j.mu.Unlock()
-		wg.Done()
-	}()
-
-	if err := os.MkdirAll(j.cacheDir, 0o755); err != nil {
-		return nil, err
-	}
-
-	url := fmt.Sprintf(redhatDetailURL, cveID)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := j.client.Do(req)
-	if err != nil {
-		j.mu.Lock()
-		j.negCache[cveID] = time.Now()
-		j.mu.Unlock()
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		j.mu.Lock()
-		j.negCache[cveID] = time.Now()
-		j.mu.Unlock()
-		return nil, nil
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("redhat detail %s: http %d", cveID, resp.StatusCode)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return nil, err
-	}
-	audit.FileWritten(path, int64(len(body)))
-
-	var d redHatDetail
-	if err := json.Unmarshal(body, &d); err != nil {
-		// keep the cache file even if parsing fails — surface error to caller
-		return nil, fmt.Errorf("decode redhat detail %s: %w", cveID, err)
-	}
-	return &d, nil
 }
 
 // rhelMajor pulls the major version digit out of OS.VersionID, e.g. "9.7" → "9".

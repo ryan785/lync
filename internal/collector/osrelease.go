@@ -50,3 +50,10 @@ func ReadOSRelease() OSInfo {
 	info, _ := readOSRelease("/etc/os-release")
 	return info
 }
+
+// ReadOSReleaseFile reads an os-release file at path (zero value if
+// unreadable).
+func ReadOSReleaseFile(path string) OSInfo {
+	info, _ := readOSRelease(path)
+	return info
+}

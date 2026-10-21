@@ -182,17 +182,23 @@ func (j *UbuntuJudge) detail(ctx context.Context, cveID string) (*ubuntuDetail, 
 	if err != nil {
 		return nil, err
 	}
+	var d ubuntuDetail
+	if err := json.Unmarshal(body, &d); err != nil {
+		return nil, fmt.Errorf("decode ubuntu detail %s: %w", cveID, err)
+	}
+	// Cache only the fields the judge reads (the full document carries
+	// notices and references and is many times larger).
+	trimmed, err := json.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+	if err := os.WriteFile(tmp, trimmed, 0o644); err != nil {
 		return nil, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return nil, err
 	}
-	audit.FileWritten(path, int64(len(body)))
-	var d ubuntuDetail
-	if err := json.Unmarshal(body, &d); err != nil {
-		return nil, fmt.Errorf("decode ubuntu detail %s: %w", cveID, err)
-	}
+	audit.FileWritten(path, int64(len(trimmed)))
 	return &d, nil
 }
