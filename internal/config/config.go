@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -17,6 +18,7 @@ type Config struct {
 	Applicability ApplicabilityConfig `yaml:"applicability"`
 	Rules         RulesConfig         `yaml:"rules"`
 	Monitor       MonitorConfig       `yaml:"monitor"`
+	Notify        NotifyConfig        `yaml:"notify"`
 }
 
 type RulesConfig struct {
@@ -65,12 +67,85 @@ type LogConfig struct {
 type ScanConfig struct {
 	Interval time.Duration `yaml:"interval"`
 	OnStart  bool          `yaml:"on_start"`
+	// OnPackageChange re-scans after the rpm/dpkg/apk database changes
+	// (inotify), once PackageChangeDelay has passed without further changes.
+	OnPackageChange    bool          `yaml:"on_package_change"`
+	PackageChangeDelay time.Duration `yaml:"package_change_delay"`
 }
 
 type FeedConfig struct {
+	// Mode: "lookup" (default) queries OSV.dev per installed package and
+	// NVD / Red Hat per CVE at scan time, with small caches; "full" bulk
+	// downloads every source on sync_interval (hundreds of MB).
+	Mode         string          `yaml:"mode"`
 	SyncInterval time.Duration   `yaml:"sync_interval"`
 	CacheDir     string          `yaml:"cache_dir"`
 	Sources      []FeedSourceCfg `yaml:"sources"`
+	Lookup       LookupConfig    `yaml:"lookup"`
+	// LocalCheck cross-checks findings against the package manager's own
+	// view of pending security updates (dnf/yum updateinfo, apt-get -s),
+	// read-only and from cached metadata. LocalRefresh refreshes that
+	// metadata first (dnf makecache / apt-get update): opt-in, it writes
+	// to the package manager's cache.
+	LocalCheck   bool `yaml:"local_check"`
+	LocalRefresh bool `yaml:"local_refresh"`
+}
+
+// LookupConfig tunes lookup mode.
+type LookupConfig struct {
+	// CacheTTL: how long NVD and Red Hat per-CVE answers are reused.
+	// OSV advisories are reused while their "modified" stamp is unchanged.
+	CacheTTL time.Duration `yaml:"cache_ttl"`
+	// NVDMaxPerRun caps NVD requests per scan (0 = 10 without an API
+	// key, 200 with one). The rest are looked up on later scans.
+	NVDMaxPerRun int `yaml:"nvd_max_per_run"`
+	// RedHatMaxPerRun caps Red Hat per-CVE requests per scan.
+	RedHatMaxPerRun int `yaml:"redhat_max_per_run"`
+}
+
+// NotifyConfig: service-mode notifications on changes. Off by default.
+type NotifyConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// MinSeverity: critical | high | medium | low | info | unknown.
+	// Findings below it never trigger a notification. Default high.
+	MinSeverity string `yaml:"min_severity"`
+	// Events to send: new, fix_available, resolved (default all three).
+	Events []string `yaml:"events"`
+	// Digest sends a summary of all current findings at this interval
+	// (0 = off), independent of changes.
+	Digest time.Duration `yaml:"digest"`
+	// StateFile remembers what each channel has been told.
+	StateFile string          `yaml:"state_file"`
+	Email     EmailConfig     `yaml:"email"`
+	Webhooks  []WebhookConfig `yaml:"webhooks"`
+}
+
+type EmailConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Host    string `yaml:"host"`
+	Port    int    `yaml:"port"` // default 587 (starttls), 465 (tls), 25 (none)
+	// TLS: starttls (default) | tls (implicit, port 465) | none (local relay only)
+	TLS          string        `yaml:"tls"`
+	Username     string        `yaml:"username"`
+	PasswordFile string        `yaml:"password_file"`
+	PasswordEnv  string        `yaml:"password_env"`
+	From         string        `yaml:"from"`
+	To           []string      `yaml:"to"`
+	AttachPDF    bool          `yaml:"attach_pdf"`
+	Timeout      time.Duration `yaml:"timeout"`
+}
+
+type WebhookConfig struct {
+	Name string `yaml:"name"`
+	// Type: generic | slack | discord | teams
+	Type string `yaml:"type"`
+	// URL, or URLFile / URLEnv to keep chat webhook tokens out of the config.
+	URL        string        `yaml:"url"`
+	URLFile    string        `yaml:"url_file"`
+	URLEnv     string        `yaml:"url_env"`
+	SecretFile string        `yaml:"secret_file"` // generic: HMAC-SHA256 key
+	SecretEnv  string        `yaml:"secret_env"`
+	Timeout    time.Duration `yaml:"timeout"`
 }
 
 type FeedSourceCfg struct {
@@ -91,8 +166,11 @@ type IPCConfig struct {
 func Default() *Config {
 	return &Config{
 		Log:  LogConfig{Level: "info", Format: "logfmt"},
-		Scan: ScanConfig{Interval: 24 * time.Hour, OnStart: false},
+		Scan: ScanConfig{Interval: 6 * time.Hour, OnStart: false, OnPackageChange: true, PackageChangeDelay: 2 * time.Minute},
 		Feed: FeedConfig{
+			Mode:         "lookup",
+			LocalCheck:   true,
+			Lookup:       LookupConfig{CacheTTL: 24 * time.Hour, RedHatMaxPerRun: 500},
 			SyncInterval: 6 * time.Hour,
 			CacheDir:     "/var/lib/lync/feeds",
 			Sources: []FeedSourceCfg{
@@ -111,6 +189,11 @@ func Default() *Config {
 		Rules: RulesConfig{
 			Enabled: true,
 			Level:   "medium",
+		},
+		Notify: NotifyConfig{
+			MinSeverity: "high",
+			Events:      []string{"new", "fix_available", "resolved"},
+			StateFile:   "/var/lib/lync/notify-state.json",
 		},
 		Monitor: MonitorConfig{
 			Enabled: true,
@@ -168,8 +251,85 @@ func (c *Config) Validate() error {
 	if c.Report.RetentionDays < 0 {
 		return fmt.Errorf("report.retention_days must be >= 0")
 	}
+	switch c.Feed.Mode {
+	case "", "lookup", "full":
+	default:
+		return fmt.Errorf("feed.mode must be lookup or full (got %q)", c.Feed.Mode)
+	}
+	if c.Scan.PackageChangeDelay < 0 {
+		return fmt.Errorf("scan.package_change_delay must be >= 0")
+	}
+	if err := c.Notify.Validate(); err != nil {
+		return err
+	}
 	// Unknown feed source names and rules levels are deliberately tolerated
 	// (feed.Build skips them; rules.ParseLevel falls back to medium) so a
 	// config typo degrades coverage instead of taking the daemon down.
+	return nil
+}
+
+// FeedMode returns the effective feed mode ("lookup" unless "full").
+func (c *Config) FeedMode() string {
+	if c.Feed.Mode == "full" {
+		return "full"
+	}
+	return "lookup"
+}
+
+// Validate checks the notify block; only enabled channels are checked.
+func (n *NotifyConfig) Validate() error {
+	if !n.Enabled {
+		return nil
+	}
+	switch strings.ToLower(n.MinSeverity) {
+	case "", "critical", "high", "medium", "low", "info", "unknown":
+	default:
+		return fmt.Errorf("notify.min_severity: unknown severity %q", n.MinSeverity)
+	}
+	for _, e := range n.Events {
+		switch e {
+		case "new", "fix_available", "resolved":
+		default:
+			return fmt.Errorf("notify.events: unknown event %q (new, fix_available, resolved)", e)
+		}
+	}
+	if n.Digest < 0 {
+		return fmt.Errorf("notify.digest must be >= 0")
+	}
+	if n.StateFile == "" {
+		return fmt.Errorf("notify.state_file must be set")
+	}
+	if e := n.Email; e.Enabled {
+		if e.Host == "" || e.From == "" || len(e.To) == 0 {
+			return fmt.Errorf("notify.email needs host, from and to")
+		}
+		switch e.TLS {
+		case "", "starttls", "tls", "none":
+		default:
+			return fmt.Errorf("notify.email.tls must be starttls, tls or none (got %q)", e.TLS)
+		}
+		if e.Username != "" && e.PasswordFile == "" && e.PasswordEnv == "" {
+			return fmt.Errorf("notify.email: username set but no password_file or password_env")
+		}
+	}
+	names := map[string]bool{}
+	for i, w := range n.Webhooks {
+		switch w.Type {
+		case "generic", "slack", "discord", "teams":
+		default:
+			return fmt.Errorf("notify.webhooks[%d]: type must be generic, slack, discord or teams (got %q)", i, w.Type)
+		}
+		if w.URL == "" && w.URLFile == "" && w.URLEnv == "" {
+			return fmt.Errorf("notify.webhooks[%d]: url, url_file or url_env is required", i)
+		}
+		name := w.Name
+		if name == "" {
+			name = fmt.Sprintf("%s-%d", w.Type, i)
+		}
+		if names[name] {
+			return fmt.Errorf("notify.webhooks: duplicate name %q", name)
+		}
+		names[name] = true
+	}
 	return nil
 }
