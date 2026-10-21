@@ -219,7 +219,104 @@ statuses drop findings.
 
 ---
 
-## Adding a rule
+## Adding a check (preferred: a check pack)
+
+Most host checks are data, not code. A pack is a YAML file in
+`internal/checks/packs/` (embedded into the binary) or in
+`/etc/lync/checks.d/` (local packs, loaded at scan time; files and the
+directory must be root-owned and not group/world-writable). The engine
+lives in `internal/rules/decl_*.go`.
+
+```yaml
+pack: redis                      # pack name: pack:redis toggles all of it
+title: Redis
+description: ...
+aliases: []                      # legacy rule names that also toggle the pack
+category: config                 # default finding category
+applies_if:                      # pack gate, ANDed with each check's gate
+  any:
+    - {package: [redis, redis-server]}
+    - {file: /etc/redis/redis.conf}
+references: [https://redis.io/docs/latest/operate/oss_and_stack/management/security/]
+test_base:                       # merged into every test vector
+  packages: {redis: "7.2.4-1"}
+checks:
+  - id: redis:protected-mode     # <area>:<name>; findings are <id>[:<key>]
+    title: Redis protected mode disabled on {_key}
+    description: Why it matters (required).
+    severity: high               # critical|high|medium|low|info
+    level: medium                # basic|medium|strict (minimum rules.level)
+    tags: [cis]                  # only where the mapping is accurate
+    probe: {type: config, format: redis, path: [/etc/redis/*.conf, /etc/redis.conf], key: protected-mode, default: "yes"}
+    where: []                    # filter observations (all must hold)
+    expect: [value eq yes]       # safe state; every failing observation is a finding
+    # expect_none: true          # alternative: every selected observation is a finding
+    # missing: pass|fail|skip    # nothing observed (default pass = not applicable)
+    severity_if:                 # first match wins
+      - {when: "value eq no", if: {listening: [6379]}, severity: critical}
+    remediation: Text; {field} placeholders are filled from the observation.
+    fix: "sed -i 's/^protected-mode no/protected-mode yes/' {file}"
+    references: [https://...]
+    tests:
+      pass: {files: {/etc/redis/redis.conf: "protected-mode yes\n"}}
+      fail: {files: {/etc/redis/redis.conf: "protected-mode no\n"}}
+      na:   {packages: {redis: "!absent"}}
+```
+
+**Gates** (`applies_if`): `package`, `binary` (standard bin dirs), `unit`
+(unit file present), `unit_active` (`systemctl is-active`), `file`
+(glob), `listening` (port), `process` (comm), `os` (family `rhel`,
+`debian`, `ubuntu`, `suse`, `alpine`, `fedora` or an os-release ID),
+`os_version_ge` / `os_version_lt`, combined with `all` / `any` / `not`.
+Values inside one field are alternatives; fields in one gate must all hold.
+
+**Probes** (all read-only and bounded; a probe that can't run makes the
+check *skipped*, never a finding):
+
+| type | reads | fields |
+|---|---|---|
+| `file` | `path` globs, or `from: nginx-cert/nginx-key/apache-key/postfix-key/dovecot-key` | path, mode, uid, gid, owner, group, type, suid, sgid, sticky, world_writable, world_readable, target (symlinks are followed: a symlink's own 0777 is never judged) |
+| `content` | `path` globs + `regex` (multiline) | match, count, line, lineno (`combine: true` = one result across files; `secret: true` hides the line) |
+| `config` | `format` + `path` + `key`/`keys` (+`section`, `default`/`defaults` per OS, `split`, `per_file`) | value, file, set, one field per key. Formats: kv, env, ini, sshd (`sshd -T` or sshd_config with Include/first-wins/defaults), nginx, apache (every directive occurrence, with context), php (per SAPI, php.ini then conf.d order), phpfpm (per pool), mycnf (!include, server sections), postgresql (per cluster, includes, auto.conf), redis, yaml, json (dotted keys) |
+| `sysctl` | `/proc/sys/<name>` | value |
+| `module` | /proc/modules, modprobe.d, modules.dep | loaded, disabled, blacklisted, available, builtin, usable |
+| `mount` | /proc/mounts | options, fstype, device |
+| `systemd` | `systemctl show` + `properties` | LoadState, ActiveState, UnitFileState, each property |
+| `listener` | `ss -tulnp` filtered by `ports`/`proto`/`process` | proto, addr, port, proc, loopback, wildcard |
+| `command` | `cmd` from the read-only allowlist (`allowedCmds`) | output, or one result per line (`lines`, `line_regex` named groups) |
+| `package` | installed packages by `name` glob | name, version, upstream (compare with `version_lt` etc., RPM vercmp) |
+| `passwd`, `shadow`, `group` | account databases | name, uid, gid, home, shell, login / hash_type, password_set, max... (never the hash) / members |
+| `sudoers` | /etc/sudoers + includes | kind, principal, principal_type, exists, nopasswd, cmds, cmds_all, setting |
+| `cron`, `authorized_keys`, `pg_hba`, `exports` | parsed entries | see `probeTypes` in decl_probes.go |
+| `process` | /proc | comm, uid, user, exe |
+| `container` | `docker`/`podman` `ps` + `inspect` | privileged, network_mode, pid_mode, user, cap_add, security_opt, docker_sock, sensitive_mounts, published_public... |
+| `x509` | cert `path` globs or `from: nginx/apache/postfix/dovecot` | days_left, expired, key_type, key_bits, sig_alg, self_signed |
+| `walk` | `roots` with `match`, `prune`, `max_depth`, `max_entries` | same as `file` |
+
+**Conditions** are `"<field> <op> [value]"`, alternatives joined with
+`||`: `eq ne in not_in regex not_regex contains not_contains lt le gt ge
+version_lt/le/gt/ge perm_max bits_all bits_none bits_any has_all has_any
+has_none empty not_empty`. Comparisons are case-insensitive except
+`regex`. A missing field or a non-numeric value for a numeric operator is
+*unknown*: the observation is skipped rather than reported. In a YAML flow
+list, quote conditions that contain commas.
+
+**Tests.** Every check needs at least one `pass` and one `fail` vector
+(`na` and `skip` are optional). A vector is a tiny fake host: `files`
+(path: content, `"!absent"` deletes a test_base file), `meta`
+(`"[d|l|s]MODE UID GID"`), `links`, `cmds` (`"name args": stdout`; any
+other command fails), `packages`, `os` (`rocky:9.4`). `TestPackVectors`
+runs them all, `TestPackLint` enforces descriptions, references, gates on
+service packs and unique IDs, and secrets used in fixtures must be the
+literal `lync-test-secret`, which may never appear in a finding.
+`docs/CHECKS.md` is generated: run `go generate ./internal/checks`.
+
+---
+
+## Adding a rule (Go)
+
+Use Go only for checks that need logic a pack can't express (correlating
+nginx locations with writable directories, kernel/package history...).
 
 A rule produces findings from host configuration, not feed data. Each
 rule is independent — runs concurrently, panics safely.

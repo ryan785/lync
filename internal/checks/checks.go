@@ -6,6 +6,8 @@ package checks
 
 import "embed"
 
+//go:generate go run ./gendoc -out ../../docs/CHECKS.md
+
 // Packs is every built-in pack (packs/*.yaml).
 //
 //go:embed packs/*.yaml

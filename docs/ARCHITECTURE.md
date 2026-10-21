@@ -65,10 +65,16 @@ set of API lookups made during the scan: see [Feed modes](#feed-modes)):
    against `dnf updateinfo` / `apt-get -s` and adds pending security
    updates nothing else explained.
 
-4. **Rules engine** runs the six non-CVE checks (hardening, sshd,
-   accounts, filesystem, network, EOL) concurrently and appends their
-   findings to the CVE-derived list. Rules run **only on full-host scans**;
-   scoped scans (`lync scan -package openssh`) skip them.
+4. **Rules engine** runs the non-CVE checks concurrently and appends
+   their findings to the CVE-derived list: the Go rules (web exposure,
+   PHP, access paths, runtimes, system state...) and the declarative
+   check packs (`internal/checks/packs/*.yaml`, evaluated by
+   `internal/rules/decl_*.go` on a pool of 8 workers). Each pack check is
+   gated (`applies_if`), runs one read-only, time- and size-bounded
+   probe, and ends as passed, failed, skipped (probe couldn't decide) or
+   not applicable; the per-pack tally is written to the report as
+   `check_coverage`. Rules run **only on full-host scans**; scoped scans
+   (`lync scan -package openssh`) skip them.
 
    Then the **application inventory** (`internal/inventory`, full-host
    scans) collects components outside the package manager and looks them
