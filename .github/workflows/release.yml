@@ -1,8 +1,15 @@
 name: release
 
-# Push a tag like v0.2.0 to publish static linux/amd64 + linux/arm64
-# binaries, run.sh and SHA256SUMS as a GitHub Release. run.sh and lync-run
-# download exactly these asset names.
+# Push a tag like v0.2.0 to publish a GitHub Release with, for linux amd64
+# and arm64:
+#   lyncd-linux-<arch>, lync-linux-<arch>   static binaries (run.sh, lync-run
+#                                           download exactly these names)
+#   lync-linux-<arch>.{deb,rpm,apk}         packages under stable names
+#                                           (install.sh uses releases/latest)
+#   lync_<ver>-1_<arch>.deb, lync-<ver>-1.<arch>.rpm, lync_<ver>-r1_<arch>.apk
+#                                           the same packages, versioned names
+#   lync-linux-<arch>.tar.gz                binaries + config + unit (manual install)
+# plus run.sh and SHA256SUMS covering every file.
 on:
   push:
     tags: ["v*"]
@@ -15,9 +22,15 @@ on:
 permissions:
   contents: write
 
+env:
+  NFPM_VERSION: "2.47.0"
+  NFPM_SHA256: "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,25 +41,44 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install nfpm
+        run: |
+          f="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "/tmp/$f" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/$f"
+          echo "${NFPM_SHA256}  /tmp/$f" | sha256sum -c -
+          sudo tar -xzf "/tmp/$f" -C /usr/local/bin nfpm
+          nfpm --version | tail -n 3
+
       - name: Test
         run: CGO_ENABLED=0 go test ./...
 
       - name: Shellcheck
-        run: shellcheck -s sh run.sh lync-run tests/runner-selftest.sh
+        run: shellcheck -s sh install.sh run.sh lync-run tests/runner-selftest.sh packaging/scripts/*.sh
 
       - name: Build release artifacts
-        run: make release
+        run: make release VERSION="$TAG"
 
       - name: Runner self-test (fake ssh, offline)
         run: sudo sh tests/runner-selftest.sh
 
+      # The runner boots with systemd: install the freshly built .deb through
+      # install.sh, check the service comes up, then remove it again.
+      - name: Package install test (install.sh + .deb + systemd)
+        run: |
+          sudo LYNC_BASE_URL="file://$PWD/dist" sh install.sh
+          systemctl is-active lync
+          test "$(lync version)" = "lync $TAG"
+          sudo lync status
+          sudo apt-get remove -y lync
+          if systemctl is-active --quiet lync; then echo "lync still running after removal"; exit 1; fi
+          test ! -e /usr/sbin/lyncd
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --title "$TAG" --notes "Static lyncd/lync for linux amd64+arm64, run.sh, SHA256SUMS. See docs/RUNNER.md."
+            gh release create "$TAG" dist/* --title "$TAG" --notes "Install as a service: curl -fsSL https://raw.githubusercontent.com/ryan785/lync/main/install.sh | sudo sh (see docs/INSTALL.md). Packages (.deb/.rpm/.apk), static lyncd/lync for linux amd64+arm64, run.sh for no-install scans (docs/RUNNER.md), SHA256SUMS."
           fi
