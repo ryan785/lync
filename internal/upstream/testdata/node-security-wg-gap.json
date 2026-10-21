@@ -1,0 +1,32 @@
+{
+  "192": {
+    "cve": [
+      "CVE-2026-58043"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.2 || ^24.18.1 || ^26.5.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/july-2026-security-releases",
+    "description": "Permission Model: --allow-fs-read/--allow-fs-write radix-tree prefix-boundary over-grant",
+    "severity": "high"
+  },
+  "193": {
+    "cve": [
+      "CVE-2026-58044"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.2 || ^24.18.1 || ^26.5.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/july-2026-security-releases",
+    "description": "HTTP Request Smuggling via Silent Header Truncation in Node.js HTTP Parser",
+    "severity": "low"
+  },
+  "194": {
+    "cve": [
+      "CVE-2026-58045"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.2 || ^24.18.1 || ^26.5.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/july-2026-security-releases",
+    "description": "Reachable assertion in node:zlib sync API crashes the entire process via spoofed TypedArray byteLength (all 11 *Sync functions affected)",
+    "severity": "medium"
+  }
+}

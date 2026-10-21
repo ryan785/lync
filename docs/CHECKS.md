@@ -51,7 +51,7 @@ Severity is the typical/maximum; some checks adjust it with context. Level is th
 | rabbitmq | 5 | 0 | 4 | 1 | 0 | 0 |
 | redis | 10 | 0 | 5 | 4 | 1 | 0 |
 | remote-admin | 13 | 1 | 7 | 4 | 1 | 0 |
-| runtimes | 16 | 2 | 4 | 5 | 5 | 0 |
+| runtimes | 18 | 3 | 5 | 5 | 5 | 0 |
 | secrets | 9 | 0 | 4 | 3 | 2 | 0 |
 | services-legacy | 19 | 0 | 3 | 4 | 11 | 1 |
 | snmp | 5 | 0 | 1 | 3 | 1 | 0 |
@@ -66,7 +66,7 @@ Severity is the typical/maximum; some checks adjust it with context. Level is th
 | web-exposure | 9 | 0 | 5 | 3 | 1 | 0 |
 | web-server | 2 | 0 | 2 | 0 | 0 | 0 |
 | webapps | 26 | 2 | 13 | 9 | 2 | 0 |
-| **total** | **722** | 48 | 214 | 215 | 243 | 2 |
+| **total** | **724** | 49 | 215 | 215 | 243 | 2 |
 
 ## Go rule (`access`)
 
@@ -823,6 +823,8 @@ Severity is the typical/maximum; some checks adjust it with context. Level is th
 | `pm2:daemon-root` | Medium | medium | PM2 runs as root | (binary pm2 or file /usr/lib/node_modules/pm2\|/usr/local/lib/node_modules/pm2\|/etc/systemd/system/pm2-root.service) |
 | `runtime:eol-node` | High | - | Running node process uses an end-of-life Node.js major (incl. nvm installs) | - |
 | `runtime:eol-python` | Medium | - | Running python process uses an end-of-life CPython outside distro paths (pyenv, /usr/local, conda) | - |
+| `upstream:node-cve` | Critical | - | Non-distro Node.js is inside a vulnerable range of a Node.js core CVE (nodejs/security-wg vuln/core, CVSS from NVD) | - |
+| `upstream:node-security-release` | High | - | Non-distro Node.js (nvm, fnm, volta, asdf, n, tarball, NodeSource, node: image) is older than a security release on its major line (nodejs.org/dist/index.json) | - |
 | `uwsgi:http-public` | Low | medium | uWSGI HTTP router listening on all interfaces ({_key}) | (binary uwsgi or package uwsgi\|uwsgi-core) |
 | `uwsgi:uid-root` | Medium | medium | uWSGI app {_key} is configured to run as root | (binary uwsgi or package uwsgi\|uwsgi-core) |
 | `uwsgi:vassal-world-writable` | High | medium | uWSGI vassal config {path} is world-writable | (binary uwsgi or package uwsgi\|uwsgi-core) |

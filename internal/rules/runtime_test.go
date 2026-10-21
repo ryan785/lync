@@ -110,6 +110,26 @@ func TestEOLForAndImageRef(t *testing.T) {
 	}
 }
 
+func TestSetRuntimeEOL(t *testing.T) {
+	defer SetRuntimeEOL("node", nil)
+	// Upstream schedule data wins over the built-in table; majors it
+	// lacks fall back to the table; nil restores the table.
+	SetRuntimeEOL("node", map[string]string{"22": "2026-01-01", "26": "2029-04-30"})
+	if _, d, past := eolFor("node", "22.22.0", fixedNow); !past || d != "2026-01-01" {
+		t.Errorf("override: eolFor(node 22) = %s, %v", d, past)
+	}
+	if _, _, past := eolFor("node", "18.20.4", fixedNow); !past {
+		t.Error("fallback: node 18 should still be EOL")
+	}
+	if _, d, past := eolFor("node", "26.12.1", fixedNow); past || d != "2029-04-30" {
+		t.Errorf("new major from schedule: %s, %v", d, past)
+	}
+	SetRuntimeEOL("node", nil)
+	if _, d, past := eolFor("node", "22.22.0", fixedNow); past || d != "2027-04-30" {
+		t.Errorf("restored: eolFor(node 22) = %s, %v", d, past)
+	}
+}
+
 func TestRuntimesNoDocker(t *testing.T) {
 	fx := newFixture(t)
 	if got := runRule(NewRuntimesRule(), nil, fx.opts()); len(got) != 0 {

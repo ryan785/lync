@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ryan785/lync/internal/collector"
@@ -19,6 +20,13 @@ func init() {
 	register(
 		CheckInfo{ID: "runtime:eol-node", Rule: "runtimes", Severity: finding.SeverityHigh,
 			Description: "Running node process uses an end-of-life Node.js major (incl. nvm installs)"},
+		// Emitted by internal/upstream (not by RuntimesRule); registered
+		// here so `lync checks` lists them and rules.disable can turn
+		// them off.
+		CheckInfo{ID: "upstream:node-security-release", Rule: "runtimes", Severity: finding.SeverityHigh,
+			Description: "Non-distro Node.js (nvm, fnm, volta, asdf, n, tarball, NodeSource, node: image) is older than a security release on its major line (nodejs.org/dist/index.json)"},
+		CheckInfo{ID: "upstream:node-cve", Rule: "runtimes", Severity: finding.SeverityCritical,
+			Description: "Non-distro Node.js is inside a vulnerable range of a Node.js core CVE (nodejs/security-wg vuln/core, CVSS from NVD)"},
 		CheckInfo{ID: "runtime:eol-python", Rule: "runtimes", Severity: finding.SeverityMedium,
 			Description: "Running python process uses an end-of-life CPython outside distro paths (pyenv, /usr/local, conda)"},
 		CheckInfo{ID: "container:latest-tag", Rule: "runtimes", Severity: finding.SeverityLow,
@@ -54,16 +62,52 @@ var eolMajors = map[string]map[string]string{
 	"mariadb":  {"10.3": "2023-05-25", "10.4": "2024-06-18", "10.5": "2025-06-24"},
 }
 
+// eolOverride holds EOL tables loaded from upstream data at scan time
+// (Node.js: nodejs/Release schedule.json, see internal/upstream). Its
+// entries win over eolMajors; keys it lacks fall back to the built-in
+// table, which is what an offline scan uses.
+var (
+	eolMu       sync.RWMutex
+	eolOverride = map[string]map[string]string{}
+)
+
+// SetRuntimeEOL sets the EOL dates for runtime ("node") from upstream
+// data: major or major.minor -> YYYY-MM-DD. An empty tbl restores the
+// built-in table.
+func SetRuntimeEOL(runtime string, tbl map[string]string) {
+	eolMu.Lock()
+	defer eolMu.Unlock()
+	if len(tbl) == 0 {
+		delete(eolOverride, runtime)
+		return
+	}
+	cp := make(map[string]string, len(tbl))
+	for k, v := range tbl {
+		cp[k] = v
+	}
+	eolOverride[runtime] = cp
+}
+
+func eolDate(runtime, key string) (string, bool) {
+	eolMu.RLock()
+	d, ok := eolOverride[runtime][key]
+	eolMu.RUnlock()
+	if ok {
+		return d, true
+	}
+	d, ok = eolMajors[runtime][key]
+	return d, ok
+}
+
 // eolFor returns (eolDate, true) if version's major / major.minor is past EOL.
 func eolFor(runtime, version string, now time.Time) (string, string, bool) {
-	tbl := eolMajors[runtime]
 	parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
 	keys := []string{parts[0]}
 	if len(parts) > 1 {
 		keys = append([]string{parts[0] + "." + parts[1]}, keys...)
 	}
 	for _, k := range keys {
-		if d, ok := tbl[k]; ok {
+		if d, ok := eolDate(runtime, k); ok {
 			t, err := time.Parse("2006-01-02", d)
 			return k, d, err == nil && now.After(t)
 		}
@@ -91,8 +135,9 @@ func (r *RuntimesRule) Run(ctx context.Context, facts *collector.Facts, log *slo
 	return out
 }
 
-// processExes returns exe path -> example pid for every process.
-func processExes(h *Host) map[string]string {
+// ProcessExes returns exe path -> example pid for every process. Shared
+// with the upstream runtime detection (internal/upstream).
+func ProcessExes(h *Host) map[string]string {
 	exes := map[string]string{}
 	for _, d := range h.ReadDir("/proc") {
 		pid := d.Name()
@@ -114,7 +159,7 @@ func processExes(h *Host) map[string]string {
 func eolRuntimes(ctx context.Context, h *Host, opts Options) []finding.Finding {
 	var out []finding.Finding
 	now := h.now()
-	exes := processExes(h)
+	exes := ProcessExes(h)
 	paths := make([]string, 0, len(exes))
 	for p := range exes {
 		paths = append(paths, p)

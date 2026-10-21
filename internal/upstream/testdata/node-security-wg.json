@@ -1,0 +1,132 @@
+{
+  "192": {
+    "cve": [
+      "CVE-2026-58043"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.2 || ^24.18.1 || ^26.5.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/july-2026-security-releases",
+    "description": "Permission Model: --allow-fs-read/--allow-fs-write radix-tree prefix-boundary over-grant",
+    "severity": "high"
+  },
+  "193": {
+    "cve": [
+      "CVE-2026-58044"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.2 || ^24.18.1 || ^26.5.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/july-2026-security-releases",
+    "description": "HTTP Request Smuggling via Silent Header Truncation in Node.js HTTP Parser",
+    "severity": "low"
+  },
+  "194": {
+    "cve": [
+      "CVE-2026-58045"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.2 || ^24.18.1 || ^26.5.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/july-2026-security-releases",
+    "description": "Reachable assertion in node:zlib sync API crashes the entire process via spoofed TypedArray byteLength (all 11 *Sync functions affected)",
+    "severity": "medium"
+  },
+  "195": {
+    "cve": [
+      "CVE-2026-105482"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.4 || ^24.22.1 || ^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (high)",
+    "severity": "high"
+  },
+  "196": {
+    "cve": [
+      "CVE-2026-105483"
+    ],
+    "vulnerable": "24.x || 26.x",
+    "patched": "^24.22.1 || ^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (high)",
+    "severity": "high"
+  },
+  "197": {
+    "cve": [
+      "CVE-2026-106069"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.4 || ^24.22.1 || ^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (high)",
+    "severity": "high"
+  },
+  "198": {
+    "cve": [
+      "CVE-2026-111497"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.4 || ^24.22.1 || ^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "Brotli decompression remote code execution",
+    "severity": "high"
+  },
+  "199": {
+    "cve": [
+      "CVE-2026-105481"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.4 || ^24.22.1 || ^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (medium)",
+    "severity": "medium"
+  },
+  "200": {
+    "cve": [
+      "CVE-2026-106072"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.4 || ^24.22.1 || ^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (medium)",
+    "severity": "medium"
+  },
+  "201": {
+    "cve": [
+      "CVE-2026-106074"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.4 || ^24.22.1 || ^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (medium)",
+    "severity": "medium"
+  },
+  "202": {
+    "cve": [
+      "CVE-2026-106070"
+    ],
+    "vulnerable": "26.x",
+    "patched": "^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (low)",
+    "severity": "low"
+  },
+  "203": {
+    "cve": [
+      "CVE-2026-106071"
+    ],
+    "vulnerable": "26.x",
+    "patched": "^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (low)",
+    "severity": "low"
+  },
+  "204": {
+    "cve": [
+      "CVE-2026-106073"
+    ],
+    "vulnerable": "22.x || 24.x || 26.x",
+    "patched": "^22.23.4 || ^24.22.1 || ^26.12.1",
+    "ref": "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+    "description": "October 2026 security release (low)",
+    "severity": "low"
+  }
+}
