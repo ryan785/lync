@@ -99,6 +99,9 @@ func main() {
 		names := splitList(*sources)
 		if *sources == "none" {
 			names = nil // collector + rules only (offline self-test)
+			// No network lookups at all: the application inventory's
+			// OSV.dev query is a vulnerability source too.
+			cfg.Inventory.Enabled = false
 		}
 		if *sources == "auto" {
 			osi := collector.ReadOSRelease()

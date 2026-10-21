@@ -81,6 +81,10 @@ func WritePDF(path string, r *Report) error {
 	w.divider()
 	w.drawSeverityChart(r.Impact)
 	w.divider()
+	if r.Inventory != nil {
+		w.drawInventory(r.Inventory)
+		w.divider()
+	}
 	w.drawFindings(r.Findings)
 	return w.pdf.OutputFileAndClose(path)
 }
@@ -537,5 +541,42 @@ func (w *pdfWriter) drawDataSources(ds *feed.ScanSources) {
 		pdf.MultiCell(contentW-6, 4.5, text, "", "L", false)
 		pdf.SetY(y + h)
 	}
+	pdf.SetTextColor(0, 0, 0)
+}
+
+// drawInventory is a short summary of the application inventory: counts
+// per ecosystem and how many components OSV.dev flagged. The component
+// list itself is in the JSON report.
+func (w *pdfWriter) drawInventory(inv *InventorySummary) {
+	pdf := w.pdf
+	w.sectionTitle("Application inventory")
+	pdf.SetFont("Helvetica", "", 9.5)
+	pdf.SetTextColor(20, 20, 20)
+	ecos := make([]string, 0, len(inv.Counts))
+	for e := range inv.Counts {
+		ecos = append(ecos, e)
+	}
+	sort.Strings(ecos)
+	var parts []string
+	for _, e := range ecos {
+		parts = append(parts, fmt.Sprintf("%s %d", e, inv.Counts[e]))
+	}
+	line := fmt.Sprintf("%d components outside the package manager", inv.Total)
+	if len(parts) > 0 {
+		line += " (" + strings.Join(parts, ", ") + ")"
+	}
+	line += "."
+	switch inv.Status {
+	case "ok":
+		line += fmt.Sprintf(" %d looked up on OSV.dev, %d with known vulnerabilities (listed under Vulnerabilities).", inv.Queried, inv.Vulnerable)
+	case "failed":
+		line += " The OSV.dev lookup FAILED: " + inv.Error
+	}
+	line += fmt.Sprintf(" Walk: %d directory entries, %d files parsed in %s", inv.Stats.Entries, inv.Stats.FilesParsed, inv.Stats.Duration.Round(time.Millisecond))
+	if inv.Stats.Truncated {
+		line += " (stopped early by a limit: results are partial)"
+	}
+	line += fmt.Sprintf("; %d warnings. Full component list in the JSON report.", inv.Warnings)
+	pdf.MultiCell(contentW, 5, line, "", "L", false)
 	pdf.SetTextColor(0, 0, 0)
 }

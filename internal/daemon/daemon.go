@@ -239,16 +239,22 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 	if d.cfg.Feed.LocalCheck && scope.IsAll() {
 		findings = d.localCrossCheck(ctx, scoped, findings, sources)
 	}
-	if !sources.Complete {
-		audit.Log("INCOMPLETE", "CVE section incomplete: %s", strings.Join(sources.IncompleteReasons, "; "))
-	}
 	if scope.IsAll() && d.rulesEngine != nil {
 		// Rules don't depend on the feed cache and aren't scoped to
 		// a single package; only run them on full-host scans.
 		findings = append(findings, d.rulesEngine.Run(ctx, scoped)...)
 	}
+	var inv *reporter.InventorySummary
+	if scope.IsAll() && d.cfg.Inventory.Enabled {
+		var invFindings []finding.Finding
+		inv, invFindings = d.runInventory(ctx, sources)
+		findings = append(findings, invFindings...)
+	}
 	if scope.IsAll() && d.mon != nil {
 		findings = append(findings, d.mon.Drain()...)
+	}
+	if !sources.Complete {
+		audit.Log("INCOMPLETE", "CVE section incomplete: %s", strings.Join(sources.IncompleteReasons, "; "))
 	}
 	impact := reporter.ComputeImpact(scoped, findings)
 
@@ -264,6 +270,7 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 	// historical JSON without rerunning a scan.
 	rep := reporter.BuildReport(scoped, findings, impact)
 	rep.DataSources = sources
+	rep.Inventory = inv
 	if err := reporter.WriteReport(jsonPath, rep); err != nil {
 		d.log.Error("write json", "err", err)
 		audit.Log("REPORT", "write json failed: %v", err)

@@ -9,6 +9,7 @@ import (
 	"github.com/ryan785/lync/internal/collector"
 	"github.com/ryan785/lync/internal/feed"
 	"github.com/ryan785/lync/internal/finding"
+	"github.com/ryan785/lync/internal/inventory"
 )
 
 type Report struct {
@@ -23,6 +24,23 @@ type Report struct {
 	// DataSources says where the CVE data came from and whether the CVE
 	// section is complete. Absent in reports from older versions.
 	DataSources *feed.ScanSources `json:"data_sources,omitempty"`
+	// Inventory lists application components found outside the package
+	// manager (full-host scans with inventory enabled).
+	Inventory *InventorySummary `json:"inventory,omitempty"`
+}
+
+// InventorySummary is the application inventory part of a report.
+type InventorySummary struct {
+	Total      int                   `json:"total"`
+	Counts     map[string]int        `json:"counts"`     // components per ecosystem
+	Vulnerable int                   `json:"vulnerable"` // components with at least one OSV hit
+	Queried    int                   `json:"queried"`    // components sent to OSV.dev
+	Status     string                `json:"status"`     // ok | failed | skipped
+	Error      string                `json:"error,omitempty"`
+	Warnings   int                   `json:"warnings"`
+	Samples    []inventory.Warning   `json:"warning_samples,omitempty"`
+	Stats      inventory.Stats       `json:"stats"`
+	Components []inventory.Component `json:"components"`
 }
 
 type Counts struct {

@@ -19,6 +19,23 @@ type Config struct {
 	Rules         RulesConfig         `yaml:"rules"`
 	Monitor       MonitorConfig       `yaml:"monitor"`
 	Notify        NotifyConfig        `yaml:"notify"`
+	Inventory     InventoryConfig     `yaml:"inventory"`
+}
+
+// InventoryConfig: application components installed outside the package
+// manager (lockfiles, site-packages, jars, Go/Rust binaries, WordPress),
+// looked up on OSV.dev during full-host scans.
+type InventoryConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Containers lists running docker/podman containers and inspects their
+	// images (talks to the container engine; nothing runs inside them).
+	Containers bool `yaml:"containers"`
+	// Roots replace the default search roots (globs allowed).
+	Roots []string `yaml:"roots"`
+	// SkipPaths are path prefixes never entered.
+	SkipPaths []string `yaml:"skip_paths"`
+	// TimeBudget bounds the filesystem walk (default 2m).
+	TimeBudget time.Duration `yaml:"time_budget"`
 }
 
 type RulesConfig struct {
@@ -190,6 +207,7 @@ func Default() *Config {
 			Enabled: true,
 			Level:   "medium",
 		},
+		Inventory: InventoryConfig{Enabled: true, TimeBudget: 2 * time.Minute},
 		Notify: NotifyConfig{
 			MinSeverity: "high",
 			Events:      []string{"new", "fix_available", "resolved"},
@@ -255,6 +273,9 @@ func (c *Config) Validate() error {
 	case "", "lookup", "full":
 	default:
 		return fmt.Errorf("feed.mode must be lookup or full (got %q)", c.Feed.Mode)
+	}
+	if c.Inventory.TimeBudget < 0 {
+		return fmt.Errorf("inventory.time_budget must be >= 0")
 	}
 	if c.Scan.PackageChangeDelay < 0 {
 		return fmt.Errorf("scan.package_change_delay must be >= 0")
