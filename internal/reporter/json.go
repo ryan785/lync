@@ -27,6 +27,9 @@ type Report struct {
 	// Inventory lists application components found outside the package
 	// manager (full-host scans with inventory enabled).
 	Inventory *InventorySummary `json:"inventory,omitempty"`
+	// Coverage summarises the check packs: how many checks applied to
+	// this host and passed, failed or were skipped (full scans only).
+	Coverage []finding.PackCoverage `json:"check_coverage,omitempty"`
 }
 
 // InventorySummary is the application inventory part of a report.

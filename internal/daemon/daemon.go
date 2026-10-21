@@ -239,10 +239,12 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 	if d.cfg.Feed.LocalCheck && scope.IsAll() {
 		findings = d.localCrossCheck(ctx, scoped, findings, sources)
 	}
+	var coverage []finding.PackCoverage
 	if scope.IsAll() && d.rulesEngine != nil {
 		// Rules don't depend on the feed cache and aren't scoped to
 		// a single package; only run them on full-host scans.
 		findings = append(findings, d.rulesEngine.Run(ctx, scoped)...)
+		coverage = d.rulesEngine.Coverage()
 	}
 	var inv *reporter.InventorySummary
 	if scope.IsAll() && d.cfg.Inventory.Enabled {
@@ -271,6 +273,7 @@ func (d *Daemon) runScan(ctx context.Context, scope Scope) error {
 	rep := reporter.BuildReport(scoped, findings, impact)
 	rep.DataSources = sources
 	rep.Inventory = inv
+	rep.Coverage = coverage
 	if err := reporter.WriteReport(jsonPath, rep); err != nil {
 		d.log.Error("write json", "err", err)
 		audit.Log("REPORT", "write json failed: %v", err)
